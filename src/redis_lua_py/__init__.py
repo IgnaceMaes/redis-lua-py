@@ -30,24 +30,30 @@ Binding a client once is often tidier than passing it to every call::
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, overload
+from typing import TypeVar, overload
 
 from ._compile import compile_function
 from ._runtime import Key, call, cjson, redis
 from ._script import BoundScript, CompiledScript
 from .errors import (
     CompileError,
+    NilTruncationWarning,
     RedisLuaError,
+    RedisLuaWarning,
     ScriptArgumentError,
     UnsupportedSyntax,
 )
+
+R = TypeVar("R")
 
 __all__ = [
     "BoundScript",
     "CompileError",
     "CompiledScript",
     "Key",
+    "NilTruncationWarning",
     "RedisLuaError",
+    "RedisLuaWarning",
     "ScriptArgumentError",
     "UnsupportedSyntax",
     "call",
@@ -60,28 +66,45 @@ __version__ = "0.1.0"  # x-release-please-version
 
 
 @overload
-def script(func: Callable[..., Any], /) -> CompiledScript: ...
+def script(func: Callable[..., R], /) -> CompiledScript[R]: ...
 
 
 @overload
-def script(*, name: str | None = ...) -> Callable[[Callable[..., Any]], CompiledScript]: ...
+def script(
+    *, name: str | None = ..., header: bool = ...
+) -> Callable[[Callable[..., R]], CompiledScript[R]]: ...
 
 
 def script(
-    func: Callable[..., Any] | None = None, /, *, name: str | None = None
-) -> CompiledScript | Callable[[Callable[..., Any]], CompiledScript]:
+    func: Callable[..., R] | None = None,
+    /,
+    *,
+    name: str | None = None,
+    header: bool = True,
+) -> CompiledScript[R] | Callable[[Callable[..., R]], CompiledScript[R]]:
     """Compile a function into a Redis Lua script.
 
     Parameters annotated :class:`Key` become ``KEYS``, in declaration order;
     every other parameter becomes ``ARGV``. An ``int`` or ``float`` annotation
     additionally wraps the argument in ``tonumber``, since ARGV always arrives
-    as a string.
+    as a string. A ``bytes`` annotation passes the argument through untouched,
+    so binary values survive exactly.
+
+    The return annotation describes what the *caller* gets back, and is carried
+    through to the call: ``-> int`` makes the script a ``CompiledScript[int]``.
+    The compiler itself does not read it.
+
+    Define scripts at module level, where they compile once at import.
+
+    ``name`` overrides the name in the generated header and in errors.
+    ``header=False`` drops the provenance comment entirely, for anyone who
+    wants the script body and nothing else.
 
     Raises :class:`UnsupportedSyntax` at decoration time, pointing at the line
     at fault, if the body strays outside the supported subset.
     """
 
-    def wrap(target: Callable[..., Any]) -> CompiledScript:
-        return compile_function(target, name=name)
+    def wrap(target: Callable[..., R]) -> CompiledScript[R]:
+        return compile_function(target, name=name, header=header)
 
     return wrap if func is None else wrap(func)

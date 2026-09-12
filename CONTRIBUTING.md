@@ -10,6 +10,18 @@ uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy
 See the [README](README.md#development) for running the suite against a live
 Redis.
 
+`src/redis_lua_py/_commands.py` is generated, not written. It is the table
+command names are checked against, and it comes from the command definitions
+in the Redis source. Refresh it when a Redis release adds commands, and commit
+the result:
+
+```sh
+uv run python scripts/generate_commands.py 8.10.1
+```
+
+A stale table can never block a caller: `redis.call('NEW.CMD', ...)` is
+deliberately never checked.
+
 ## Commit messages
 
 Pull requests are squash-merged, so **the PR title becomes the commit subject

@@ -7,12 +7,25 @@ claim being made.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
-from redis_lua_py import CompiledScript, Key, redis, script
+import pytest
 
-Body = Callable[[CompiledScript], str]
+from redis_lua_py import (
+    CompiledScript,
+    Key,
+    NilTruncationWarning,
+    UnsupportedSyntax,
+    redis,
+    script,
+)
+
+Body = Callable[[CompiledScript[object]], str]
+
+#: A module-level constant that folds to nil, for the refusal below.
+NOTHING = None
 
 
 class TestMissingValues:
@@ -268,3 +281,105 @@ class TestReturnConversion:
             return out
 
         assert s(client) == [b"a", b"b"]
+
+
+class TestTruncatedReplies:
+    """A nil inside a returned table cuts the reply off at that point.
+
+    Redis converts a returned Lua array by walking it from index 1 and stopping
+    at the first nil, so the caller sees a shorter list rather than a null in
+    the middle. Which values are actually nil is the part worth being exact
+    about: a command with nothing to return hands Lua ``false``, not ``nil``,
+    and false converts to a null *element* without ending the array.
+    """
+
+    def test_a_missing_value_is_a_null_element_not_a_truncation(self, client: Any) -> None:
+        @script
+        def s(k: Key) -> list[bytes | int]:
+            return [1, redis.get(k), 3]
+
+        # Three values, the middle one null: `false` does not end the array.
+        assert s(client, k="absent") == [1, None, 3]
+
+    def test_an_unassigned_name_does_truncate(self, client: Any) -> None:
+        """The real trap, and the one the compiler warns about."""
+        with pytest.warns(NilTruncationWarning, match="'head' is not assigned"):
+
+            @script
+            def s(k: Key, n: int) -> list[int]:
+                if n > 0:
+                    head = 2
+                return [1, head, 3]
+
+        assert s(client, k="x", n=1) == [1, 2, 3]
+        assert s(client, k="x", n=0) == [1]  # nil at index 2, and the rest is gone
+
+    def test_a_literal_none_in_a_returned_table_is_refused(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match="truncates the reply"):
+
+            @script
+            def s(k: Key) -> list[int]:
+                return [1, None, 3]
+
+    def test_a_constant_folding_to_nil_is_refused_the_same_way(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match="truncates the reply"):
+
+            @script
+            def s(k: Key) -> list[int]:
+                return [1, NOTHING, 3]
+
+    def test_a_bare_none_return_is_still_fine(self, client: Any) -> None:
+        """Only a nil *inside* a table is a problem; a nil reply is a nil reply."""
+
+        @script
+        def s(k: Key) -> None:
+            return None
+
+        assert s(client, k="x") is None
+
+
+class TestDefiniteAssignment:
+    """What the truncation warning does and does not fire on."""
+
+    def test_a_branch_that_returns_establishes_the_name_below_it(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+
+            @script
+            def s(k: Key, n: int) -> list[int]:
+                if n <= 0:
+                    return [0]
+                head = 2
+                return [1, head]
+
+    def test_both_arms_assigning_is_enough(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+
+            @script
+            def s(k: Key, n: int) -> list[int]:
+                if n > 0:
+                    head = 1
+                else:
+                    head = 2
+                return [1, head]
+
+    def test_a_loop_body_does_not_count_because_it_may_not_run(self) -> None:
+        with pytest.warns(NilTruncationWarning, match="'head'"):
+
+            @script
+            def s(k: Key, n: int) -> list[int]:
+                for i in range(n):
+                    head = i
+                return [1, head]
+
+    def test_a_name_returned_outside_a_table_is_not_flagged(self) -> None:
+        """A nil reply is visible to the caller; a truncated list is not."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+
+            @script
+            def s(k: Key, n: int) -> int:
+                if n > 0:
+                    head = 1
+                return head
