@@ -15,10 +15,16 @@ language with a faithful Lua meaning is accepted.
   `.items()`, `.keys()` and `.values()`, binding a name or a tuple of names.
 - **Helper functions** defined with `def` at the top level of the body. They
   can call each other and themselves.
-- **Expressions:** comparisons; arithmetic; `and`/`or`, and `a if c else b`,
-  both as values; f-strings; list and dict literals.
+- **Expressions:** comparisons; arithmetic; `in` and `not in`; `and`/`or`, and
+  `a if c else b`, both as values; list and dict literals.
+- **Subscripts:** indices, dict keys, negative literal indices on a name, and
+  slices without a step, of lists and strings.
+- **Strings:** f-strings with format specs; `%` formatting; `+` and `*` on a
+  string; `str.join`, `upper`, `lower`, `strip`, `lstrip`, `rstrip`,
+  `startswith`, `endswith`, `find`, `split` and `replace`.
 - **Builtins and methods:** `len()`, `int()`, `float()`, `str()`, `min()`,
-  `max()`, `abs()`, `.append()`, `.insert()`, `.pop()` and `str.join()`.
+  `max()`, `abs()`, `ord()`, `chr()`, `.append()`, `.insert()`, `.pop()` and
+  `dict.get()`.
 - **The `math` module:** `floor`, `ceil`, `sqrt`, `fabs`, `fmod`, `exp`,
   `log`, `log10` and `pow`, imported either way.
 - **Calls:** into `redis` and `cjson`, with `*xs` allowed as the last argument.
