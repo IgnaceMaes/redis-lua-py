@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.5.1](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.5.0...v0.5.1) (2026-09-12)
+
+
+### Fixed
+
+* load redis functions libraries on redis-py 4.2 ([#16](https://github.com/IgnaceMaes/redis-lua-py/issues/16)) ([85c2ba2](https://github.com/IgnaceMaes/redis-lua-py/commit/85c2ba20056224af7b2c9720176f799cf54b163f))
+
 ## [0.5.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.4.0...v0.5.0) (2026-09-12)
 
 
