@@ -29,10 +29,11 @@ Binding a client once is often tidier than passing it to every call::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TypeVar, overload
 
-from ._compile import compile_function
+from ._compile import check_flags, compile_function
+from ._library import Library, LibraryFunction
 from ._runtime import Key, call, cjson, redis
 from ._script import BoundScript, CompiledScript
 from .errors import (
@@ -52,6 +53,8 @@ __all__ = [
     "CompileError",
     "CompiledScript",
     "Key",
+    "Library",
+    "LibraryFunction",
     "NilTruncationWarning",
     "RedisLuaError",
     "RedisLuaWarning",
@@ -73,7 +76,7 @@ def script(func: Callable[..., R], /) -> CompiledScript[R]: ...
 
 @overload
 def script(
-    *, name: str | None = ..., header: bool = ...
+    *, name: str | None = ..., header: bool = ..., flags: Iterable[str] = ...
 ) -> Callable[[Callable[..., R]], CompiledScript[R]]: ...
 
 
@@ -83,6 +86,7 @@ def script(
     *,
     name: str | None = None,
     header: bool = True,
+    flags: Iterable[str] = (),
 ) -> CompiledScript[R] | Callable[[Callable[..., R]], CompiledScript[R]]:
     """Compile a function into a Redis Lua script.
 
@@ -100,13 +104,16 @@ def script(
 
     ``name`` overrides the name in the generated header and in errors.
     ``header=False`` drops the provenance comment entirely, for anyone who
-    wants the script body and nothing else.
+    wants the script body and nothing else. ``flags`` takes the script flags
+    Redis 7 defines, such as ``no-writes``, and puts them on a ``#!lua`` line.
 
     Raises :class:`UnsupportedSyntax` at decoration time, pointing at the line
     at fault, if the body strays outside the supported subset.
     """
+    requested = (flags,) if isinstance(flags, str) else tuple(flags)
 
     def wrap(target: Callable[..., R]) -> CompiledScript[R]:
-        return compile_function(target, name=name, header=header)
+        checked = check_flags(requested, owner=target.__name__)
+        return compile_function(target, name=name, header=header, flags=checked)
 
     return wrap if func is None else wrap(func)

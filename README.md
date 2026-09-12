@@ -122,6 +122,10 @@ script cache is cold once per script rather than once per environment.
   for libraries — `python -m redis_lua_py generate` writes the Lua to a module
   of plain strings, so your users never depend on this package, and `--check`
   keeps it current in CI.
+- **[Redis Functions](https://ignacemaes.com/redis-lua-py/guide/redis-functions/)** —
+  the same Python compiles into a function library, loaded with `FUNCTION LOAD`
+  on first use and called with `FCALL`, and scripts take Redis 7 flags such as
+  `no-writes`.
 - **[The gaps between Lua and Python](https://ignacemaes.com/redis-lua-py/reference/lua-vs-python/)**
   are closed or refused — truthiness, 1-based indexing, `false` versus `nil`,
   block scope, and the nil that truncates a returned table.
