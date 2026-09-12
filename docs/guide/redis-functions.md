@@ -29,7 +29,7 @@ def peek(key: Key) -> int:
 
 ```python
 hit(client, key="user:42", ttl=60)  # FCALL hit 1 user:42 60
-peek(client, key="user:42")         # FCALL_RO peek 1 user:42
+peek(client, key="user:42")  # FCALL_RO peek 1 user:42
 ```
 
 A function is called like a script: pass a sync client and you get a value,
