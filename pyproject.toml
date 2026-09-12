@@ -1,6 +1,6 @@
 [project]
 name = "redis-lua-py"
-version = "0.5.0"
+version = "0.5.1"
 description = "Write Redis Lua scripts as real Python functions, not strings."
 readme = "README.md"
 requires-python = ">=3.10"
