@@ -105,8 +105,10 @@ script(client, /, *positional, **keyword) -> Awaitable[R]   # async client
 | `name` | `str` | the script's name, in the header and in errors |
 | `lua` | `str` | the full Lua source, exactly as sent to Redis |
 | `params` | `tuple[str, ...]` | every parameter, in declaration order |
-| `keys` | `tuple[str, ...]` | the parameters annotated `Key` |
-| `args` | `tuple[str, ...]` | everything else |
+| `keys` | `tuple[str, ...]` | the parameters annotated `Key` or `list[Key]`, in `KEYS` order |
+| `args` | `tuple[str, ...]` | everything else, in `ARGV` order |
+| `variadic_key` | `str \| None` | the `list[Key]` parameter, which fills the rest of `KEYS` |
+| `variadic_arg` | `str \| None` | the list parameter that fills the rest of `ARGV` |
 | `doc` | `str \| None` | the function's docstring |
 | `source` | `str` | where it was defined, repo-relative |
 

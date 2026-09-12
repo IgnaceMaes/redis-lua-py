@@ -11,9 +11,10 @@ from __future__ import annotations
 import ast
 import difflib
 import inspect
+import math
 import textwrap
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -118,6 +119,27 @@ _BUILTIN_FUNCS: dict[str, str] = {
     "max": "math.max",
 }
 
+# Functions of the math module with a Lua counterpart of the same meaning.
+# math.log is handled apart, since only its one-argument form has one.
+_MATH_FUNCS: dict[str, str] = {
+    "floor": "math.floor",
+    "ceil": "math.ceil",
+    "sqrt": "math.sqrt",
+    "fabs": "math.abs",
+    "fmod": "math.fmod",
+    "exp": "math.exp",
+    "log10": "math.log10",
+    "pow": "math.pow",
+}
+
+# The same functions by value, so `from math import floor` resolves too.
+_MATH_BY_OBJECT: dict[object, str] = {getattr(math, name): name for name in [*_MATH_FUNCS, "log"]}
+
+_METHOD_HINT = (
+    "Only the redis and cjson namespaces, list.append(), list.insert(), list.pop() "
+    "and str.join() are available."
+)
+
 _TRUTHY_HELPER = """\
 -- Python truthiness: 0, '', empty tables and nil are all false.
 local function __truthy(v)
@@ -134,6 +156,22 @@ _ISNIL_HELPER = """\
 -- operand is evaluated once, not once per comparison.
 local function __isnil(v)
   return v == nil or v == false
+end
+"""
+
+_OR_HELPER = """\
+-- Python's `a or b`: a when it is truthy by Python's rules, otherwise b.
+local function __or(a, b)
+  if __truthy(a) then return a end
+  return b
+end
+"""
+
+_AND_HELPER = """\
+-- Python's `a and b`: b when a is truthy by Python's rules, otherwise a.
+local function __and(a, b)
+  if __truthy(a) then return b end
+  return a
 end
 """
 
@@ -162,6 +200,17 @@ class _Compiler:
         self.simple_assigns: set[int] = set()
         self.needs_truthy = False
         self.needs_isnil = False
+        self.needs_or = False
+        self.needs_and = False
+        self.variadic_key: str | None = None
+        self.variadic_arg: str | None = None
+        # Helpers defined in the body, which calls resolve to.
+        self.local_functions: set[str] = set()
+        # Every name the body assigns, and the statement that assigns it first.
+        self.assigned: set[str] = set()
+        self.first_assignment: dict[str, ast.stmt] = {}
+        # The names a statement assigns for the first time, by statement id.
+        self.first_names: dict[int, list[str]] = {}
         self._temp = 0
 
     # ----------------------------------------------------------------- errors
@@ -259,40 +308,60 @@ class _Compiler:
         def record(name: str, node: ast.stmt) -> None:
             nodes.setdefault(name, []).append(node)
 
-        for node in ast.walk(self.func):
+        # A helper function has a scope of its own, compiled separately, so
+        # what it assigns is not the script's business.
+        for node in _walk_scope(self.func):
             if isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        record(target.id, node)
+                    for name in _target_names(target):
+                        record(name, node)
             elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(
                 node.target, ast.Name
             ):
                 record(node.target.id, node)
-            elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+            elif isinstance(node, ast.For):
                 # Loop targets get Lua's own loop scope; only record them so
                 # that reads of the name resolve.
-                self.known.add(node.target.id)
+                self.known.update(_target_names(node.target))
+            elif isinstance(node, ast.FunctionDef):
+                self.known.add(node.name)
+                self.local_functions.add(node.name)
 
-        top_level = {id(stmt) for stmt in self.func.body}
+        by_id: dict[int, ast.stmt] = {}
         for name, assignments in nodes.items():
             self.known.add(name)
+            self.assigned.add(name)
             if name in self.params:
                 # Already a local from the prelude. Declaring it again would
                 # shadow the argument with nil.
                 continue
             # ast.walk is breadth-first, so ask for source order explicitly.
             first = min(assignments, key=lambda n: (n.lineno, n.col_offset))
-            if id(first) in top_level:
-                self.simple_assigns.add(id(first))
+            self.first_assignment[name] = first
+            self.first_names.setdefault(id(first), []).append(name)
+            by_id[id(first)] = first
+
+        top_level = {id(stmt) for stmt in self.func.body}
+        for node_id, names in self.first_names.items():
+            # `local a, b = ...` only works when the statement introduces
+            # every name it assigns; otherwise the new ones are declared up
+            # front and the statement becomes a plain assignment.
+            if node_id in top_level and _declares_exactly(by_id[node_id], names):
+                self.simple_assigns.add(node_id)
             else:
-                self.hoisted.append(name)
+                self.hoisted.extend(names)
 
     # -------------------------------------------------------------- signature
 
     def compile_signature(self) -> list[lua.Stat]:
         sig = self.func.args
         if sig.vararg or sig.kwarg:
-            self.fail(self.func, "*args and **kwargs are not supported in a script signature")
+            self.fail(
+                self.func,
+                "*args and **kwargs are not supported in a script signature",
+                hint="Annotate one parameter as list[Key] for a variable number of keys, "
+                "or as list[str] for a variable number of arguments.",
+            )
         if sig.posonlyargs:
             self.fail(self.func, "positional-only parameters are not supported")
 
@@ -303,6 +372,23 @@ class _Compiler:
                 self.fail(arg, f"{name!r} is a reserved word in Lua")
             self.params.append(name)
             self.known.add(name)
+
+            item = self._list_item(arg.annotation)
+            if item is not None:
+                # KEYS and ARGV have no names, only positions, so a list can
+                # only take whatever is left after the fixed parameters: one
+                # list of keys, and one list of arguments.
+                if self._is_key(item):
+                    if self.variadic_key is not None:
+                        self.fail(arg, "only one list[Key] parameter is supported")
+                    self.variadic_key = name
+                else:
+                    if self.variadic_arg is not None:
+                        self.fail(arg, "only one list parameter of arguments is supported")
+                    self.variadic_arg = name
+                    if self._is_numeric(item):
+                        self.numeric_args.add(name)
+                continue
 
             if self._is_key(arg.annotation):
                 self.keys.append(name)
@@ -316,6 +402,18 @@ class _Compiler:
                     self.numeric_args.add(name)
                     source = lua.Call(lua.Name("tonumber"), (source,))
             prelude.append(lua.Local([name], [source]))
+
+        if self.variadic_key is not None:
+            self.keys.append(self.variadic_key)
+            prelude += self.rest_of("KEYS", self.variadic_key, len(self.keys), numeric=False)
+        if self.variadic_arg is not None:
+            self.args.append(self.variadic_arg)
+            prelude += self.rest_of(
+                "ARGV",
+                self.variadic_arg,
+                len(self.args),
+                numeric=self.variadic_arg in self.numeric_args,
+            )
 
         if sig.defaults or any(d is not None for d in sig.kw_defaults):
             self.fail(
@@ -342,6 +440,46 @@ class _Compiler:
 
     def _is_numeric(self, node: ast.expr | None) -> bool:
         return self._annotation_name(node) in {"int", "float"}
+
+    @staticmethod
+    def _list_item(node: ast.expr | None) -> ast.expr | None:
+        """The element annotation of a ``list[...]`` parameter, if it is one."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            try:
+                node = ast.parse(node.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(node, ast.Subscript) and _Compiler._annotation_name(node.value) in {
+            "list",
+            "List",
+            "Sequence",
+        }:
+            return node.slice
+        return None
+
+    def rest_of(self, table: str, name: str, start: int, *, numeric: bool) -> list[lua.Stat]:
+        """Collect KEYS or ARGV from ``start`` onwards into a local table.
+
+        A loop rather than ``{unpack(ARGV, start)}``, which would put every
+        element on the Lua stack at once and fail past a few thousand.
+        """
+        self._temp += 1
+        idx = f"__i{self._temp}"
+        item: lua.Expr = lua.Index(lua.Name(table), lua.Name(idx))
+        if numeric:
+            item = lua.Call(lua.Name("tonumber"), (item,))
+        target = lua.Name(name)
+        slot = lua.Index(target, lua.BinOp("+", lua.UnOp("#", target), lua.Num(1)))
+        return [
+            lua.Local([name], [lua.Table()]),
+            lua.NumericFor(
+                idx,
+                lua.Num(start),
+                lua.UnOp("#", lua.Name(table)),
+                None,
+                [lua.Assign([slot], [item])],
+            ),
+        ]
 
     # ------------------------------------------------------------ expressions
 
@@ -372,19 +510,9 @@ class _Compiler:
             case ast.Compare():
                 return self.compare(node)
             case ast.BoolOp():
-                self.fail(
-                    node,
-                    "'and'/'or' are only supported in an if or while condition",
-                    hint="In Python these return an operand, which does not survive the "
-                    "difference in truthiness. Use an if statement instead.",
-                )
+                return self.boolop_value(node)
             case ast.IfExp():
-                self.fail(
-                    node,
-                    "conditional expressions (a if c else b) are not supported",
-                    hint="Lua's `c and a or b` is wrong when a is false or nil. "
-                    "Use an if statement.",
-                )
+                return self.ifexp(node)
             case ast.Call():
                 return self.call(node)
             case ast.Subscript():
@@ -511,32 +639,156 @@ class _Compiler:
     def call(self, node: ast.Call) -> lua.Expr:
         if node.keywords:
             self.fail(node, "keyword arguments are not supported in a script body")
-        args = tuple(self.expr(a) for a in node.args)
+        args = self.call_args(node)
+
+        math_attr = self.math_attr(node.func)
+        if math_attr is not None:
+            return self.math_call(node, math_attr, args)
 
         match node.func:
+            case ast.Name(id=name) if name in self.local_functions:
+                return lua.Call(lua.Name(name), args)
             case ast.Name(id="len"):
                 if len(args) != 1:
                     self.fail(node, "len() takes exactly one argument")
                 return lua.UnOp("#", args[0])
             case ast.Name(id=name) if name in _BUILTIN_FUNCS:
                 return lua.Call(lua.Name(_BUILTIN_FUNCS[name]), args)
+            case ast.Attribute(value=receiver, attr="join") if not self.is_namespace(receiver):
+                if len(args) != 1:
+                    self.fail(node, "join() takes exactly one argument")
+                return lua.Call(lua.Name("table.concat"), (args[0], self.expr(receiver)))
+            case ast.Attribute(value=ast.Name(id=recv) as receiver, attr="pop" | "insert") if (
+                recv in self.known
+            ):
+                return self.list_method(node, receiver)
             case ast.Attribute(value=ast.Name(id=recv), attr=attr):
                 return self.namespace_call(node, recv, attr, args)
             case ast.Attribute(attr=attr):
-                self.fail(
-                    node,
-                    f"method call .{attr}() is not supported",
-                    hint="Only the redis and cjson namespaces, and list.append(), are available.",
-                )
+                self.fail(node, f"method call .{attr}() is not supported", hint=_METHOD_HINT)
             case ast.Name(id=name):
                 self.fail(
                     node,
                     f"{name}() is not available inside a script",
-                    hint="A script cannot call Python functions; only Redis commands "
-                    "and a small set of builtins.",
+                    hint="A script cannot call Python functions from outside it; define a "
+                    "helper inside the body, or use a Redis command or a builtin.",
                 )
             case _:
                 self.fail(node, "unsupported call target")
+
+    def call_args(self, node: ast.Call) -> tuple[lua.Expr, ...]:
+        """Compile call arguments, turning a trailing ``*xs`` into ``unpack(xs)``."""
+        args: list[lua.Expr] = []
+        for position, arg in enumerate(node.args):
+            if isinstance(arg, ast.Starred):
+                if position != len(node.args) - 1:
+                    self.fail(
+                        arg,
+                        "a starred argument must be the last one",
+                        hint="Lua's unpack() only expands in the last position. Append the "
+                        "trailing values to the list first, then splat it.",
+                    )
+                args.append(lua.Call(lua.Name("unpack"), (self.expr(arg.value),)))
+            else:
+                args.append(self.expr(arg))
+        return tuple(args)
+
+    def is_namespace(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Name) and self.namespace_kind(node.id) is not None
+
+    def math_attr(self, func: ast.expr) -> str | None:
+        """The math function a call target names, as `math.floor` or a bare `floor`."""
+        if isinstance(func, ast.Name) and func.id not in self.known:
+            value = self.globalns.get(func.id, _UNBOUND)
+            try:
+                return _MATH_BY_OBJECT.get(value)
+            except TypeError:  # an unhashable module global
+                return None
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id not in self.known
+            and self.globalns.get(func.value.id) is math
+        ):
+            return func.attr
+        return None
+
+    def math_call(self, node: ast.Call, attr: str, args: tuple[lua.Expr, ...]) -> lua.Expr:
+        if attr == "log":
+            if len(args) != 1:
+                self.fail(
+                    node,
+                    "math.log() with a base is not supported",
+                    hint="Lua 5.1's math.log takes no base; divide by math.log(base) instead.",
+                )
+            return lua.Call(lua.Name("math.log"), args)
+        target = _MATH_FUNCS.get(attr)
+        if target is None:
+            self.fail(
+                node,
+                f"math.{attr}() has no Lua counterpart",
+                hint=f"Available: {_listing(sorted([*_MATH_FUNCS, 'log']), limit=10)}.",
+            )
+        return lua.Call(lua.Name(target), args)
+
+    def list_method(self, node: ast.Call, receiver: ast.Name) -> lua.Expr:
+        """``xs.pop()`` and ``xs.insert(i, x)``, with the index shifted to 1-based."""
+        assert isinstance(node.func, ast.Attribute)
+        target = self.expr(receiver)
+        if node.func.attr == "pop":
+            if not node.args:
+                return lua.Call(lua.Name("table.remove"), (target,))
+            if len(node.args) == 1:
+                return lua.Call(lua.Name("table.remove"), (target, self.index(node.args[0])))
+            self.fail(node, "pop() takes at most one argument")
+        if len(node.args) != 2:
+            self.fail(node, "insert() takes exactly two arguments")
+        return lua.Call(
+            lua.Name("table.insert"),
+            (target, self.index(node.args[0]), self.expr(node.args[1])),
+        )
+
+    def boolop_value(self, node: ast.BoolOp) -> lua.Expr:
+        """``a or b`` used for its value, with Python's truthiness and laziness.
+
+        Lua's own and/or test Lua truthiness, where 0 and '' are true, so the
+        idiomatic ``tonumber(x) or 0`` would mean something else. A right side
+        that is a name or a literal goes through a helper; anything else is
+        wrapped in a function, so it only runs when Python would run it.
+        """
+        is_or = isinstance(node.op, ast.Or)
+        self.needs_truthy = True
+        result = self.expr(node.values[0])
+        for value in node.values[1:]:
+            right = self.expr(value)
+            if _is_cheap(value):
+                if is_or:
+                    self.needs_or = True
+                else:
+                    self.needs_and = True
+                result = lua.Call(lua.Name("__or" if is_or else "__and"), (result, right))
+                continue
+            self._temp += 1
+            operand = f"__v{self._temp}"
+            test: lua.Expr = lua.Call(lua.Name("__truthy"), (lua.Name(operand),))
+            if not is_or:
+                test = lua.UnOp("not", test)
+            body = (lua.If([(test, [lua.Return(lua.Name(operand))])]), lua.Return(right))
+            result = lua.Call(lua.Function((operand,), body), (result,))
+        return result
+
+    def ifexp(self, node: ast.IfExp) -> lua.Expr:
+        """``a if c else b``, which Lua 5.1 has no expression for.
+
+        ``c and a or b`` is exactly right when ``a`` cannot be false or nil,
+        which a literal cannot; otherwise the branches go in a function.
+        """
+        test = self.condition(node.test)
+        then, otherwise = self.expr(node.body), self.expr(node.orelse)
+        if isinstance(then, lua.Num | lua.Str | lua.Bytes | lua.Table) or then == lua.Bool(True):
+            return lua.BinOp("or", lua.BinOp("and", test, then), otherwise)
+        body = (lua.If([(test, [lua.Return(then)])]), lua.Return(otherwise))
+        return lua.Call(lua.Function((), body), ())
 
     def namespace_call(
         self, node: ast.Call, recv: str, attr: str, args: tuple[lua.Expr, ...]
@@ -551,7 +803,7 @@ class _Compiler:
         self.fail(
             node,
             f"method call .{attr}() is not supported",
-            hint="Only the redis and cjson namespaces, and list.append(), are available.",
+            hint=_METHOD_HINT,
         )
 
     def namespace_kind(self, name: str) -> str | None:
@@ -760,8 +1012,10 @@ class _Compiler:
                     "exception handling is not supported",
                     hint="Use redis.pcall() and check the result for an 'err' field.",
                 )
-            case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef() | ast.Lambda():
-                self.fail(node, "a script cannot define nested functions or classes")
+            case ast.FunctionDef():
+                return [self.nested_function(node)]
+            case ast.AsyncFunctionDef() | ast.ClassDef():
+                self.fail(node, "a script cannot define async functions or classes")
             case ast.Import() | ast.ImportFrom():
                 self.fail(node, "a script cannot import anything")
             case ast.With() | ast.AsyncWith():
@@ -811,6 +1065,8 @@ class _Compiler:
     def assign(
         self, node: ast.stmt, target: ast.expr, value: ast.expr, *, augmented: bool = False
     ) -> list[lua.Stat]:
+        if isinstance(target, ast.Tuple | ast.List):
+            return self.unpack_assign(node, target.elts, value)
         rhs = self.expr(value)
         match target:
             case ast.Name(id=name):
@@ -821,10 +1077,112 @@ class _Compiler:
                 return [lua.Assign([lua.Name(name)], [rhs])]
             case ast.Subscript():
                 return [lua.Assign([self.subscript(target)], [rhs])]
-            case ast.Tuple() | ast.List():
-                self.fail(target, "tuple unpacking is not supported")
             case _:
                 self.fail(target, "unsupported assignment target")
+
+    def unpack_assign(
+        self, node: ast.stmt, elts: list[ast.expr], value: ast.expr
+    ) -> list[lua.Stat]:
+        """``a, b = ...``: Lua's multiple assignment, which also evaluates first.
+
+        A tuple on the right maps one to one. Anything else is bound once and
+        indexed, so ``head, tail = redis.lrange(k, 0, 1)`` runs the command once.
+        """
+        targets: list[lua.Expr] = []
+        for element in elts:
+            if isinstance(element, ast.Name):
+                if not lua.is_identifier(element.id):
+                    self.fail(element, f"{element.id!r} is a reserved word in Lua")
+                targets.append(lua.Name(element.id))
+            elif isinstance(element, ast.Subscript):
+                targets.append(self.subscript(element))
+            else:
+                self.fail(element, "only names and subscripts can be unpacked into")
+
+        prefix: list[lua.Stat] = []
+        if isinstance(value, ast.Tuple | ast.List) and not any(
+            isinstance(v, ast.Starred) for v in value.elts
+        ):
+            if len(value.elts) != len(elts):
+                self.fail(node, f"cannot unpack {len(value.elts)} values into {len(elts)} targets")
+            values = [self.expr(v) for v in value.elts]
+        else:
+            self._temp += 1
+            bound = f"__t{self._temp}"
+            prefix.append(lua.Local([bound], [self.expr(value)]))
+            values = [lua.Index(lua.Name(bound), lua.Num(i + 1)) for i in range(len(elts))]
+
+        if id(node) in self.simple_assigns:
+            names = [e.id for e in elts if isinstance(e, ast.Name)]
+            return [*prefix, lua.Local(names, values)]
+        return [*prefix, lua.Assign(targets, values)]
+
+    def nested_function(self, node: ast.FunctionDef) -> lua.Stat:
+        """Compile a helper defined in the body to a Lua local function.
+
+        It gets a compiler of its own, so that the names it assigns are local
+        to it as they would be in Python, while it can still read the names of
+        the script around it, call other helpers, and call itself.
+        """
+        if not any(stmt is node for stmt in self.func.body):
+            self.fail(
+                node,
+                "a helper function must be defined at the top level of the script body",
+                hint="Move the def out of the if or loop it is in.",
+            )
+        if node.decorator_list:
+            self.fail(node, "a helper function cannot be decorated")
+        sig = node.args
+        if sig.vararg or sig.kwarg or sig.posonlyargs or sig.kwonlyargs or sig.defaults:
+            self.fail(
+                node,
+                "a helper function takes plain positional parameters only",
+                hint="Calls inside a script are positional, so defaults, *args and "
+                "keyword-only parameters have nothing to bind to.",
+            )
+        for name in [node.name, *(a.arg for a in sig.args)]:
+            if not lua.is_identifier(name):
+                self.fail(node, f"{name!r} is a reserved word in Lua")
+        params = [a.arg for a in sig.args]
+
+        child = _Compiler(
+            node,
+            filename=self.filename,
+            first_lineno=self.first_lineno,
+            lines=self.lines,
+            globalns=self.globalns,
+        )
+        child.params = params
+        child.known = self.known | set(params) | {node.name}
+        child.local_functions = self.local_functions | {node.name}
+        child._temp = self._temp
+        child.collect_assigned()
+
+        body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+        statements = _flatten(child.block(body))
+        if child.hoisted:
+            statements.insert(0, lua.Local(sorted(set(child.hoisted)), []))
+
+        self._temp = child._temp
+        self.needs_truthy |= child.needs_truthy
+        self.needs_isnil |= child.needs_isnil
+        self.needs_or |= child.needs_or
+        self.needs_and |= child.needs_and
+
+        # Python resolves a free name when the helper runs; Lua binds it where
+        # the function is written. A script name first assigned after the def
+        # is declared up front instead, so the helper sees it too.
+        reads = {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        for name in reads - set(params) - child.assigned:
+            first = self.first_assignment.get(name)
+            if first is None or id(first) not in self.simple_assigns or first.lineno < node.lineno:
+                continue
+            self.simple_assigns.discard(id(first))
+            self.hoisted.extend(self.first_names[id(first)])
+
+        return lua.LocalFunction(node.name, params, statements)
 
     def if_stmt(self, node: ast.If) -> lua.If:
         branches = [(self.condition(node.test), self.block(node.body))]
@@ -839,35 +1197,106 @@ class _Compiler:
     def for_stmt(self, node: ast.For) -> lua.Stat:
         if node.orelse:
             self.fail(node, "for/else is not supported")
-        if not isinstance(node.target, ast.Name):
-            self.fail(node.target, "only a single loop variable is supported")
-        var = node.target.id
-        self.known.add(var)
+        names = self.loop_names(node.target)
+        self.known.update(names)
+        it = node.iter
 
         if (
-            isinstance(node.iter, ast.Call)
-            and isinstance(node.iter.func, ast.Name)
-            and node.iter.func.id == "range"
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Attribute)
+            and it.func.attr in {"items", "keys", "values"}
+            and not it.args
+            and not self.is_namespace(it.func.value)
         ):
-            return self.range_loop(node, var, node.iter)
+            return self.pairs_loop(node, names, it.func)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
+            if len(names) != 1:
+                self.fail(node.target, "range() yields one value per step")
+            return self.range_loop(node, names[0], it)
+        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "enumerate":
+            return self.enumerate_loop(node, names, it)
 
-        # Iterating a table: bind the sequence once, then walk it by index so
-        # that a call in the iterable is not re-evaluated every step.
-        iterable = self.expr(node.iter)
+        iterable = self.expr(it)
+        prefix, seq, idx = self.bind_sequence(iterable)
+        element: lua.Expr = lua.Index(seq, lua.Name(idx))
+        binding: list[lua.Stat]
+        if len(names) == 1:
+            binding = [lua.Local(names, [element])]
+        else:
+            # `for name, n in pairs:` unpacks each element by position.
+            self._temp += 1
+            item = f"__e{self._temp}"
+            binding = [
+                lua.Local([item], [element]),
+                lua.Local(
+                    names, [lua.Index(lua.Name(item), lua.Num(i + 1)) for i in range(len(names))]
+                ),
+            ]
+        body = [*binding, *self.block(node.body)]
+        return _Block([*prefix, lua.NumericFor(idx, lua.Num(1), lua.UnOp("#", seq), None, body)])
+
+    def loop_names(self, target: ast.expr) -> list[str]:
+        if isinstance(target, ast.Name):
+            names = [target.id]
+        elif isinstance(target, ast.Tuple | ast.List) and all(
+            isinstance(e, ast.Name) for e in target.elts
+        ):
+            names = [e.id for e in target.elts if isinstance(e, ast.Name)]
+        else:
+            self.fail(target, "a loop can only bind a name, or a flat tuple of names")
+        for name in names:
+            if not lua.is_identifier(name):
+                self.fail(target, f"{name!r} is a reserved word in Lua")
+        return names
+
+    def bind_sequence(self, iterable: lua.Expr) -> tuple[list[lua.Stat], lua.Expr, str]:
+        """Bind a sequence once, and name an index to walk it with.
+
+        Walking by index, rather than with ipairs, keeps a call in the iterable
+        from being re-evaluated on every step. A plain name is already stable,
+        so it is left alone.
+        """
         self._temp += 1
         idx = f"__i{self._temp}"
-
-        # Bind the iterable to a temporary so a call is not re-evaluated on
-        # every step. A plain name is already stable, so leave it alone.
-        prefix: list[lua.Stat] = []
         if isinstance(iterable, lua.Name):
-            seq: lua.Expr = iterable
-        else:
-            seq = lua.Name(f"__seq{self._temp}")
-            prefix = [lua.Local([f"__seq{self._temp}"], [iterable])]
+            return [], iterable, idx
+        seq = f"__seq{self._temp}"
+        return [lua.Local([seq], [iterable])], lua.Name(seq), idx
 
+    def pairs_loop(self, node: ast.For, names: list[str], method: ast.Attribute) -> lua.Stat:
+        """``d.items()``, ``d.keys()`` and ``d.values()``, over Lua's pairs().
+
+        pairs() visits entries in no particular order, as does Lua itself;
+        sort the result if the order reaches the caller.
+        """
+        wanted = 2 if method.attr == "items" else 1
+        if len(names) != wanted:
+            shape = "a key and a value" if wanted == 2 else "one value"
+            self.fail(node.target, f"{method.attr}() yields {shape} per step")
+        table = self.expr(method.value)
+        if method.attr == "values":
+            self._temp += 1
+            names = [f"__k{self._temp}", names[0]]
+        iterator = lua.Call(lua.Name("pairs"), (table,))
+        return lua.GenericFor(names, iterator, self.block(node.body))
+
+    def enumerate_loop(self, node: ast.For, names: list[str], call: ast.Call) -> lua.Stat:
+        if call.keywords or not 1 <= len(call.args) <= 2:
+            self.fail(call, "enumerate() takes an iterable and an optional start")
+        if len(names) != 2:
+            self.fail(node.target, "enumerate() yields an index and a value per step")
+        start = _literal_int(call.args[1]) if len(call.args) == 2 else 0
+        if start is None:
+            self.fail(call.args[1], "enumerate() start must be an integer literal")
+
+        prefix, seq, idx = self.bind_sequence(self.expr(call.args[0]))
+        # Lua counts from 1; Python's enumerate counts from `start`.
+        position: lua.Expr = lua.Name(idx)
+        if start != 1:
+            position = self._offset(position, start - 1)
         body: list[lua.Stat] = [
-            lua.Local([var], [lua.Index(seq, lua.Name(idx))]),
+            lua.Local([names[0]], [position]),
+            lua.Local([names[1]], [lua.Index(seq, lua.Name(idx))]),
             *self.block(node.body),
         ]
         return _Block([*prefix, lua.NumericFor(idx, lua.Num(1), lua.UnOp("#", seq), None, body)])
@@ -939,7 +1368,7 @@ def _unassigned_in_returns(
                 case ast.Return() | ast.Break():
                     return True
                 case ast.Assign(targets=targets):
-                    live.update(t.id for t in targets if isinstance(t, ast.Name))
+                    live.update(name for t in targets for name in _target_names(t))
                 case (
                     ast.AnnAssign(target=ast.Name(id=name))
                     | ast.AugAssign(target=ast.Name(id=name))
@@ -1044,6 +1473,48 @@ def _as_literal(value: object) -> lua.Expr | None:
             return None
 
 
+def _walk_scope(root: ast.AST) -> Iterator[ast.AST]:
+    """Like ast.walk, but not into the bodies of nested functions or classes."""
+    pending = list(ast.iter_child_nodes(root))
+    while pending:
+        node = pending.pop(0)
+        yield node
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _target_names(target: ast.expr) -> list[str]:
+    """The names an assignment or loop target binds."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Tuple | ast.List):
+        return [name for element in target.elts for name in _target_names(element)]
+    return []
+
+
+def _declares_exactly(node: ast.stmt, names: list[str]) -> bool:
+    """True if every target of the statement is a name it assigns first."""
+    if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        target = node.targets[0]
+        if isinstance(target, ast.Tuple | ast.List):
+            return all(isinstance(e, ast.Name) for e in target.elts) and sorted(
+                _target_names(target)
+            ) == sorted(names)
+    return True
+
+
+def _is_cheap(node: ast.expr) -> bool:
+    """An operand that can be evaluated early without changing anything."""
+    match node:
+        case ast.Constant() | ast.Name():
+            return True
+        case ast.UnaryOp(op=ast.USub(), operand=ast.Constant()):
+            return True
+        case ast.Attribute():
+            return _dotted_name(node) is not None
+    return False
+
+
 def _is_none(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
@@ -1066,7 +1537,7 @@ def _flatten(body: list[lua.Stat]) -> list[lua.Stat]:
             stat.branches = [(t, _flatten(b)) for t, b in stat.branches]
             stat.orelse = _flatten(stat.orelse)
             out.append(stat)
-        elif isinstance(stat, lua.While | lua.NumericFor):
+        elif isinstance(stat, lua.While | lua.NumericFor | lua.GenericFor | lua.LocalFunction):
             stat.body = _flatten(stat.body)
             out.append(stat)
         else:
@@ -1143,7 +1614,7 @@ def compile_function(
 
     statements = _flatten(compiler.block(body))
     if compiler.hoisted:
-        prelude.append(lua.Local(sorted(compiler.hoisted), []))
+        prelude.append(lua.Local(sorted(set(compiler.hoisted)), []))
 
     for element, unassigned in _unassigned_in_returns(body, set(compiler.params), compiler.known):
         warnings.warn_explicit(
@@ -1173,6 +1644,10 @@ def compile_function(
         parts.append(_TRUTHY_HELPER.rstrip())
     if compiler.needs_isnil:
         parts.append(_ISNIL_HELPER.rstrip())
+    if compiler.needs_or:
+        parts.append(_OR_HELPER.rstrip())
+    if compiler.needs_and:
+        parts.append(_AND_HELPER.rstrip())
     parts.append(lua.emit(prelude + statements).rstrip())
 
     return CompiledScript(
@@ -1181,6 +1656,8 @@ def compile_function(
         params=tuple(compiler.params),
         keys=tuple(compiler.keys),
         args=tuple(compiler.args),
+        variadic_key=compiler.variadic_key,
+        variadic_arg=compiler.variadic_arg,
         doc=doc,
         source=f"{filename}:{first_lineno}",
     )

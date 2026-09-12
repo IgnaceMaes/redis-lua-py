@@ -18,21 +18,22 @@ def test_continue_is_rejected() -> None:
             return n
 
 
-def test_boolop_outside_a_condition_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="only supported in an if or while"):
-
-        @script
-        def s(a: int, b: int) -> int:
-            flag = a and b
-            return flag
-
-
-def test_conditional_expression_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="conditional expressions"):
+def test_lambda_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="Lambda expressions"):
 
         @script
         def s(a: int) -> int:
-            return 1 if a else 2
+            double = lambda x: x * 2  # noqa: E731
+            return double(a)
+
+
+def test_starred_unpacking_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="only names and subscripts"):
+
+        @script
+        def s(k: Key) -> int:
+            head, *_rest = redis.lrange(k, 0, -1)
+            return head
 
 
 def test_closure_variable_is_rejected() -> None:
@@ -104,13 +105,13 @@ def test_import_is_rejected() -> None:
             return 1
 
 
-def test_nested_function_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="nested functions"):
+def test_helper_with_a_default_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="plain positional parameters"):
 
         @script
         def s(k: Key) -> int:
-            def helper() -> int:
-                return 1
+            def helper(n=1):
+                return n
 
             return helper()
 
@@ -123,12 +124,12 @@ def test_calling_a_python_function_is_rejected() -> None:
             return sorted(redis.lrange(k, 0, -1))
 
 
-def test_tuple_unpacking_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="tuple unpacking"):
+def test_unpacking_the_wrong_number_of_values_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="cannot unpack 3 values into 2"):
 
         @script
         def s(k: Key) -> int:
-            a, b = 1, 2
+            a, b = 1, 2, 3
             return a
 
 
@@ -140,12 +141,15 @@ def test_default_value_is_rejected() -> None:
             return n
 
 
-def test_varargs_are_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match=r"\*args"):
+def test_varargs_are_rejected_with_a_pointer_to_list_parameters() -> None:
+    with pytest.raises(UnsupportedSyntax, match=r"\*args") as info:
 
         @script
         def s(k: Key, *rest: str) -> int:
             return 1
+
+    assert info.value.hint is not None
+    assert "list[Key]" in info.value.hint
 
 
 def test_assert_is_rejected() -> None:

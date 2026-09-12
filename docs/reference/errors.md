@@ -4,12 +4,11 @@ Every error this package raises carries a caret under the line at fault, and a
 hint saying what to write instead.
 
 ```
-'and'/'or' are only supported in an if or while condition
+Lua 5.1 has no 'continue' statement
   File "/srv/app/limits.py", line 12
-    flag = a and b
-           ^
-  hint: In Python these return an operand, which does not survive the
-  difference in truthiness. Use an if statement instead.
+    continue
+    ^
+  hint: Invert the condition and put the rest of the loop body inside the if.
 ```
 
 ## The hierarchy

@@ -234,6 +234,33 @@ class Comment(Stat):
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class Function(Expr):
+    """An anonymous function, emitted on one line.
+
+    Only ever produced to be called on the spot. That is how an expression that
+    needs statements -- `a or b` whose right side must not run early, or a
+    conditional expression whose branch may be false -- keeps Python's meaning.
+    """
+
+    params: tuple[str, ...]
+    body: tuple[Stat, ...]
+
+
+@dataclass(slots=True)
+class LocalFunction(Stat):
+    name: str
+    params: list[str]
+    body: list[Stat]
+
+
+@dataclass(slots=True)
+class GenericFor(Stat):
+    names: list[str]
+    iterator: Expr
+    body: list[Stat]
+
+
 def emit_expr(node: Expr, parent_prec: int = 0) -> str:
     """Render an expression, parenthesising only where precedence demands it."""
     match node:
@@ -278,7 +305,11 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
             return f"{base}[{emit_expr(key)}]"
         case Call(func=func, args=args):
             rendered = ", ".join(emit_expr(a) for a in args)
-            return f"{emit_expr(func, 9)}({rendered})"
+            callee = f"({emit_expr(func)})" if isinstance(func, Function) else emit_expr(func, 9)
+            return f"{callee}({rendered})"
+        case Function(params=params, body=body):
+            inner = " ".join(line.strip() for line in emit_block(list(body)))
+            return f"function({', '.join(params)}) {inner} end"
         case UnOp(op=op, operand=operand):
             spacer = " " if op == "not" else ""
             text = f"{op}{spacer}{emit_expr(operand, _UNARY_PRECEDENCE)}"
@@ -327,6 +358,14 @@ def emit_block(body: list[Stat], indent: int = 0) -> list[str]:
                 lines.append(f"{pad}do break end")
             case While(test=test, body=inner):
                 lines.append(f"{pad}while {emit_expr(test)} do")
+                lines += emit_block(inner, indent + 1)
+                lines.append(f"{pad}end")
+            case LocalFunction(name=name, params=params, body=inner):
+                lines.append(f"{pad}local function {name}({', '.join(params)})")
+                lines += emit_block(inner, indent + 1)
+                lines.append(f"{pad}end")
+            case GenericFor(names=names, iterator=iterator, body=inner):
+                lines.append(f"{pad}for {', '.join(names)} in {emit_expr(iterator)} do")
                 lines += emit_block(inner, indent + 1)
                 lines.append(f"{pad}end")
             case NumericFor(var=var, start=start, stop=stop, step=step, body=inner):

@@ -5,8 +5,33 @@ split into subcommand tokens, so `redis.script_load(x)` compiles to
 `redis.call('SCRIPT', 'LOAD', x)`.
 
 `redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`,
-`redis.log` and `cjson.encode` / `cjson.decode` pass through under their own
-names.
+`redis.log`, `redis.set_repl`, `redis.acl_check_cmd` and `cjson.encode` /
+`cjson.decode` pass through under their own names. So do the constants they
+take: `redis.LOG_WARNING` and the other log levels, `redis.REPL_ALL` and the
+other replication modes, and `redis.REDIS_VERSION`.
+
+## Splatting a list into a command
+
+A starred argument compiles to `unpack`, which is how a list becomes the
+arguments of a command:
+
+```python
+@script
+def push_all(queue: Key, jobs: list[str]) -> int:
+    return redis.rpush(queue, *jobs)
+```
+
+```lua
+return redis.call('RPUSH', queue, unpack(jobs))
+```
+
+It has to be the last argument, because Lua's `unpack` only expands there.
+
+!!! warning "unpack has a limit"
+
+    `unpack` puts every element on Lua's stack at once, and Redis' Lua refuses
+    past roughly eight thousand values with "too many results to unpack".
+    Split a list that can grow that large into chunks, one command per chunk.
 
 ## Names are checked, not just uppercased
 
