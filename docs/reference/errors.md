@@ -4,11 +4,11 @@ Every error this package raises carries a caret under the line at fault, and a
 hint saying what to write instead.
 
 ```
-Lua 5.1 has no 'continue' statement
+chained comparisons are not supported
   File "/srv/app/limits.py", line 12
-    continue
-    ^
-  hint: Invert the condition and put the rest of the loop body inside the if.
+    if 0 < n < limit:
+       ^
+  hint: Split 'a < b < c' into 'a < b and b < c'.
 ```
 
 ## The hierarchy

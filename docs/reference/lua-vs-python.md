@@ -68,9 +68,49 @@ for i in range(0, len(fields), 2):
     redis.hset(copy, fields[i], fields[i + 1])
 ```
 
-## There is no `continue`
+## `continue` is closed
 
-Lua 5.1 does not have one. Invert the condition and nest the rest of the body.
+Lua 5.1 has neither `continue` nor `goto`. A loop body that uses `continue`
+runs inside `repeat ... until true`, a block that runs once, and `continue`
+leaves that block. A `break` in the same loop sets a flag on the way out, and
+the loop breaks on it.
+
+```lua
+for i = 0, n - 1 do
+  repeat
+    if i % 2 == 0 then
+      do break end
+    end
+    total = total + i
+  until true
+end
+```
+
+A loop without `continue` compiles as it always did.
+
+## Exceptions are messages
+
+Lua has errors, not exception classes. `try` compiles to a local function run
+under `pcall`, so an error from `redis.call`, from `raise`, or from Lua itself
+lands in the `except` block. `except Exception as e` binds `e` to the error's
+message, as a string.
+
+That shapes what is accepted:
+
+- **One `except` clause**, bare or `except Exception`. An error carries no
+  type, so `except ValueError` would quietly catch everything, and is refused.
+  Branch on the message instead.
+- **`raise SomeError("message")`** compiles to `error("message", 0)`. The class
+  is not kept, and the caller receives an error reply carrying the message. A
+  bare `raise` inside `except` raises the caught error again.
+- **`finally`** runs after the `try`, `except` and `else` blocks, and an error
+  that was not handled is raised again once it has run.
+- **`return` inside `try`** returns from the script, as it would in Python.
+- **`break` and `continue` cannot leave a `try` body**, because it runs as a
+  separate function. Set a flag inside the `try` and act on it after.
+
+A script is atomic but not transactional: writes made before an error are
+kept, whether or not something catches it.
 
 ## A loop variable does not outlive its loop
 

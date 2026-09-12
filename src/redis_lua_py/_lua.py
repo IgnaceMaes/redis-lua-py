@@ -247,6 +247,24 @@ class Function(Expr):
     body: tuple[Stat, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class Values(Expr):
+    """Several values where Lua takes a list of them, as in `return true, v`."""
+
+    items: tuple[Expr, ...]
+
+
+@dataclass(slots=True)
+class Repeat(Stat):
+    """`repeat ... until true`: a block that runs once and can be left with break.
+
+    That is how `continue` is spelled in Lua 5.1, which has neither `continue`
+    nor `goto`.
+    """
+
+    body: list[Stat]
+
+
 @dataclass(slots=True)
 class LocalFunction(Stat):
     name: str
@@ -307,6 +325,8 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
             rendered = ", ".join(emit_expr(a) for a in args)
             callee = f"({emit_expr(func)})" if isinstance(func, Function) else emit_expr(func, 9)
             return f"{callee}({rendered})"
+        case Values(items=items):
+            return ", ".join(emit_expr(item) for item in items)
         case Function(params=params, body=body):
             inner = " ".join(line.strip() for line in emit_block(list(body)))
             return f"function({', '.join(params)}) {inner} end"
@@ -360,6 +380,10 @@ def emit_block(body: list[Stat], indent: int = 0) -> list[str]:
                 lines.append(f"{pad}while {emit_expr(test)} do")
                 lines += emit_block(inner, indent + 1)
                 lines.append(f"{pad}end")
+            case Repeat(body=inner):
+                lines.append(f"{pad}repeat")
+                lines += emit_block(inner, indent + 1)
+                lines.append(f"{pad}until true")
             case LocalFunction(name=name, params=params, body=inner):
                 lines.append(f"{pad}local function {name}({', '.join(params)})")
                 lines += emit_block(inner, indent + 1)

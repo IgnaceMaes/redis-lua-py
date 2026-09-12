@@ -15,6 +15,7 @@ import math
 import textwrap
 import warnings
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -175,6 +176,24 @@ local function __and(a, b)
 end
 """
 
+_ERRMSG_HELPER = """\
+-- The message of a caught error. Redis hands pcall a string, but a table with
+-- an err field or a userdata are possible too, so each is turned into one.
+local function __errmsg(e)
+  if type(e) == 'table' and e.err ~= nil then return e.err end
+  return tostring(e)
+end
+"""
+
+
+@dataclass
+class _Loop:
+    """The loop a break or continue belongs to."""
+
+    #: Set when the loop also uses continue: a break then has to leave the
+    #: `repeat ... until true` block first, and says so through this flag.
+    break_flag: str | None
+
 
 class _Compiler:
     def __init__(
@@ -211,6 +230,14 @@ class _Compiler:
         self.first_assignment: dict[str, ast.stmt] = {}
         # The names a statement assigns for the first time, by statement id.
         self.first_names: dict[int, list[str]] = {}
+        self.needs_errmsg = False
+        # What a break or continue would leave: a loop, or None for the body of
+        # a try, which runs as a function and so is out of any loop's reach.
+        self.flow: list[_Loop | None] = []
+        # How deep inside try bodies we are, where a return has to say so.
+        self.protected_depth = 0
+        # The error variable of each enclosing except block, for a bare raise.
+        self.handlers: list[str] = []
         self._temp = 0
 
     # ----------------------------------------------------------------- errors
@@ -326,6 +353,9 @@ class _Compiler:
             elif isinstance(node, ast.FunctionDef):
                 self.known.add(node.name)
                 self.local_functions.add(node.name)
+            elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+                # Bound as a local inside the except block itself.
+                self.known.add(node.name)
 
         by_id: dict[int, ast.stmt] = {}
         for name, assignments in nodes.items():
@@ -952,7 +982,7 @@ class _Compiler:
             compiled = self.stmt(stmt)
             if reachable:
                 out.extend(compiled)
-            if isinstance(stmt, ast.Return | ast.Break):
+            if isinstance(stmt, ast.Return | ast.Break | ast.Continue | ast.Raise):
                 reachable = False
         return out
 
@@ -979,11 +1009,11 @@ class _Compiler:
                 ast.copy_location(synthetic, node)
                 return self.assign(node, target, synthetic, augmented=True)
             case ast.Return(value=None):
-                return [lua.Return(None)]
+                return [self.return_stat(None)]
             case ast.Return(value=ast.expr() as value):
                 rendered = self.expr(value)
                 self.check_reply(value, rendered)
-                return [lua.Return(rendered)]
+                return [self.return_stat(rendered)]
             case ast.If():
                 return [self.if_stmt(node)]
             case ast.For():
@@ -991,27 +1021,26 @@ class _Compiler:
             case ast.While(test=test, orelse=orelse, body=body):
                 if orelse:
                     self.fail(node, "while/else is not supported")
-                return [lua.While(self.condition(test), self.block(body))]
+                return [lua.While(self.condition(test), self.loop_body(body))]
             case ast.Break():
+                loop = self.enclosing_loop(node, "break")
+                if loop.break_flag is not None:
+                    flag = lua.Name(loop.break_flag)
+                    return [lua.Assign([flag], [lua.Bool(True)]), lua.Break()]
                 return [lua.Break()]
             case ast.Continue():
-                self.fail(
-                    node,
-                    "Lua 5.1 has no 'continue' statement",
-                    hint="Invert the condition and put the rest of the loop body inside the if.",
-                )
-            case ast.Assert():
-                self.fail(
-                    node,
-                    "assert is not supported",
-                    hint="Return redis.error_reply('...') to signal failure to the caller.",
-                )
-            case ast.Try() | ast.Raise():
-                self.fail(
-                    node,
-                    "exception handling is not supported",
-                    hint="Use redis.pcall() and check the result for an 'err' field.",
-                )
+                self.enclosing_loop(node, "continue")
+                # The body of a loop that continues sits in `repeat ... until
+                # true`, so leaving that block is exactly Python's continue.
+                return [lua.Break()]
+            case ast.Assert(test=test, msg=msg):
+                message = lua.Str("AssertionError") if msg is None else self.expr(msg)
+                failed = lua.UnOp("not", self.condition(test))
+                return [lua.If([(failed, [self.error_stat(message)])])]
+            case ast.Raise():
+                return [self.raise_stmt(node)]
+            case ast.Try():
+                return self.try_stmt(node)
             case ast.FunctionDef():
                 return [self.nested_function(node)]
             case ast.AsyncFunctionDef() | ast.ClassDef():
@@ -1168,6 +1197,7 @@ class _Compiler:
         self.needs_isnil |= child.needs_isnil
         self.needs_or |= child.needs_or
         self.needs_and |= child.needs_and
+        self.needs_errmsg |= child.needs_errmsg
 
         # Python resolves a free name when the helper runs; Lua binds it where
         # the function is written. A script name first assigned after the def
@@ -1183,6 +1213,178 @@ class _Compiler:
             self.hoisted.extend(self.first_names[id(first)])
 
         return lua.LocalFunction(node.name, params, statements)
+
+    # --------------------------------------------------------- control flow
+
+    def loop_body(
+        self, body: list[ast.stmt], binding: list[lua.Stat] | None = None
+    ) -> list[lua.Stat]:
+        """Compile a loop body, making room for continue when it uses one.
+
+        Lua 5.1 has no continue and no goto. A body that continues runs inside
+        `repeat ... until true`, where continue is a break out of that block. A
+        break in the same loop sets a flag first, and the loop breaks on it.
+        """
+        continues = _loop_has(body, ast.Continue)
+        flag = None
+        if continues and _loop_has(body, ast.Break):
+            self._temp += 1
+            flag = f"__brk{self._temp}"
+        self.flow.append(_Loop(break_flag=flag))
+        try:
+            inner = self.block(body)
+        finally:
+            self.flow.pop()
+
+        out = list(binding or [])
+        if not continues:
+            return out + inner
+        if flag is not None:
+            out.append(lua.Local([flag], [lua.Bool(False)]))
+        out.append(lua.Repeat(inner))
+        if flag is not None:
+            out.append(lua.If([(lua.Name(flag), [lua.Break()])]))
+        return out
+
+    def enclosing_loop(self, node: ast.stmt, keyword: str) -> _Loop:
+        loop = self.flow[-1] if self.flow else None
+        if loop is None:
+            self.fail(
+                node,
+                f"'{keyword}' cannot leave a try block",
+                hint="The try body runs as a function under pcall, so the loop around it "
+                "is out of reach. Set a flag inside the try, and act on it after.",
+            )
+        return loop
+
+    def return_stat(self, value: lua.Expr | None) -> lua.Stat:
+        """A return, which inside a try body also has to leave the protected call."""
+        if self.protected_depth:
+            return lua.Return(lua.Values((lua.Bool(True), value or lua.Nil())))
+        return lua.Return(value)
+
+    def error_stat(self, message: lua.Expr) -> lua.Stat:
+        """``error(message, 0)``.
+
+        Level 0 keeps Lua's `user_script:12:` position out of the message, so
+        the caller, or an except block, sees exactly what was raised.
+        """
+        if not isinstance(message, lua.Str):
+            message = lua.Call(lua.Name("tostring"), (message,))
+        return lua.ExprStat(lua.Call(lua.Name("error"), (message, lua.Num(0))))
+
+    def raise_stmt(self, node: ast.Raise) -> lua.Stat:
+        """``raise SomeError('message')``, which reaches the caller as an error reply."""
+        if node.cause is not None:
+            self.fail(
+                node,
+                "raise ... from ... is not supported",
+                hint="An error inside a script carries only a message; raise it on its own.",
+            )
+        exc = node.exc
+        if exc is None:
+            if not self.handlers:
+                self.fail(node, "a bare raise can only re-raise inside an except block")
+            self.needs_errmsg = True
+            return self.error_stat(lua.Call(lua.Name("__errmsg"), (lua.Name(self.handlers[-1]),)))
+        if isinstance(exc, ast.Call) and not exc.keywords:
+            if len(exc.args) > 1:
+                self.fail(exc, "an error raised in a script carries a single message")
+            if exc.args:
+                return self.error_stat(self.expr(exc.args[0]))
+            return self.error_stat(lua.Str(_callee_name(exc.func)))
+        if isinstance(exc, ast.Name):
+            if exc.id in self.known:
+                # The name an `except ... as e` bound, which holds a message.
+                return self.error_stat(self.expr(exc))
+            return self.error_stat(lua.Str(exc.id))
+        self.fail(exc, "only raise SomeError('message') is supported")
+
+    def try_stmt(self, node: ast.Try) -> list[lua.Stat]:
+        """try/except/else/finally, over pcall.
+
+        The body runs as a local function under pcall, so an error inside it --
+        from redis.call, a raise, or Lua itself -- lands in the except block. A
+        return inside the body has to leave that function first, so it hands
+        back a flag and the value, which are returned again once pcall is done.
+        """
+        if len(node.handlers) > 1:
+            self.fail(
+                node.handlers[1],
+                "only one except clause is supported",
+                hint="An error inside a script carries a message, but no type to tell "
+                "clauses apart. Catch Exception, and branch on the message.",
+            )
+        handler = node.handlers[0] if node.handlers else None
+        if handler is not None and handler.type is not None and not _is_catch_all(handler.type):
+            self.fail(
+                handler.type,
+                f"except {ast.unparse(handler.type)} cannot be told apart from any other error",
+                hint="An error inside a script carries only a message, so every except "
+                "catches everything. Write except Exception, and branch on the message.",
+            )
+
+        if node.finalbody:
+            # The try/except/else runs protected as a whole, then the finally
+            # block, then any error is raised again or the return goes through.
+            inner: list[ast.stmt] = node.body if handler is None else [_without_finally(node)]
+            setup, ok, result, value, returns = self.protected(inner)
+            out = [*setup, *self.block(node.finalbody)]
+            self.needs_errmsg = True
+            reraise = self.error_stat(lua.Call(lua.Name("__errmsg"), (lua.Name(result),)))
+            out.append(lua.If([(lua.UnOp("not", lua.Name(ok)), [reraise])]))
+            if returns:
+                out.append(lua.If([(lua.Name(result), [self.return_stat(lua.Name(value))])]))
+            return out
+
+        assert handler is not None  # a try without finally has a handler
+        setup, ok, result, value, returns = self.protected(node.body)
+        success: list[lua.Stat] = []
+        if returns:
+            success.append(lua.If([(lua.Name(result), [self.return_stat(lua.Name(value))])]))
+        success += self.block(node.orelse)
+
+        failure: list[lua.Stat] = []
+        if handler.name is not None:
+            self.needs_errmsg = True
+            message = lua.Call(lua.Name("__errmsg"), (lua.Name(result),))
+            failure.append(lua.Local([handler.name], [message]))
+        self.handlers.append(result)
+        try:
+            failure += self.block(handler.body)
+        finally:
+            self.handlers.pop()
+
+        if success:
+            return [*setup, lua.If([(lua.Name(ok), success)], failure)]
+        return [*setup, lua.If([(lua.UnOp("not", lua.Name(ok)), failure)])]
+
+    def protected(self, body: list[ast.stmt]) -> tuple[list[lua.Stat], str, str, str, bool]:
+        """Compile a body into a local function and a pcall of it.
+
+        Returns the statements, the names pcall's results are bound to, and
+        whether the body returns, in which case a third result carries the value.
+        """
+        self._temp += 1
+        n = self._temp
+        function, ok, result, value = f"__try{n}", f"__ok{n}", f"__r{n}", f"__v{n}"
+        self.flow.append(None)
+        self.protected_depth += 1
+        try:
+            inner = self.block(body)
+        finally:
+            self.protected_depth -= 1
+            self.flow.pop()
+        returns = _contains_return(body)
+        names = [ok, result, value] if returns else [ok, result]
+        call = lua.Call(lua.Name("pcall"), (lua.Name(function),))
+        return (
+            [lua.LocalFunction(function, [], inner), lua.Local(names, [call])],
+            ok,
+            result,
+            value,
+            returns,
+        )
 
     def if_stmt(self, node: ast.If) -> lua.If:
         branches = [(self.condition(node.test), self.block(node.body))]
@@ -1232,7 +1434,7 @@ class _Compiler:
                     names, [lua.Index(lua.Name(item), lua.Num(i + 1)) for i in range(len(names))]
                 ),
             ]
-        body = [*binding, *self.block(node.body)]
+        body = self.loop_body(node.body, binding)
         return _Block([*prefix, lua.NumericFor(idx, lua.Num(1), lua.UnOp("#", seq), None, body)])
 
     def loop_names(self, target: ast.expr) -> list[str]:
@@ -1278,7 +1480,7 @@ class _Compiler:
             self._temp += 1
             names = [f"__k{self._temp}", names[0]]
         iterator = lua.Call(lua.Name("pairs"), (table,))
-        return lua.GenericFor(names, iterator, self.block(node.body))
+        return lua.GenericFor(names, iterator, self.loop_body(node.body))
 
     def enumerate_loop(self, node: ast.For, names: list[str], call: ast.Call) -> lua.Stat:
         if call.keywords or not 1 <= len(call.args) <= 2:
@@ -1294,11 +1496,13 @@ class _Compiler:
         position: lua.Expr = lua.Name(idx)
         if start != 1:
             position = self._offset(position, start - 1)
-        body: list[lua.Stat] = [
-            lua.Local([names[0]], [position]),
-            lua.Local([names[1]], [lua.Index(seq, lua.Name(idx))]),
-            *self.block(node.body),
-        ]
+        body = self.loop_body(
+            node.body,
+            [
+                lua.Local([names[0]], [position]),
+                lua.Local([names[1]], [lua.Index(seq, lua.Name(idx))]),
+            ],
+        )
         return _Block([*prefix, lua.NumericFor(idx, lua.Num(1), lua.UnOp("#", seq), None, body)])
 
     def range_loop(self, node: ast.For, var: str, call: ast.Call) -> lua.Stat:
@@ -1326,7 +1530,7 @@ class _Compiler:
 
         # Python's range excludes the stop value; Lua's numeric for includes it.
         stop = self._offset(self.expr(stop_node), 1 if descending else -1)
-        return lua.NumericFor(var, start, stop, step, self.block(node.body))
+        return lua.NumericFor(var, start, stop, step, self.loop_body(node.body))
 
     @staticmethod
     def _offset(expr: lua.Expr, delta: int) -> lua.Expr:
@@ -1400,6 +1604,13 @@ def _unassigned_in_returns(
                     walk(inner, set(live) | {name})
                 case ast.While(body=inner) | ast.For(body=inner):
                     walk(inner, set(live))
+                case ast.Try(body=inner, handlers=handlers, orelse=orelse, finalbody=final):
+                    # Any statement of the try may be the one that failed, so
+                    # nothing it assigns counts as established afterwards.
+                    walk(inner + orelse, set(live))
+                    for handler in handlers:
+                        walk(handler.body, set(live))
+                    walk(final, set(live))
         return False
 
     walk(body, set(assigned))
@@ -1515,6 +1726,54 @@ def _is_cheap(node: ast.expr) -> bool:
     return False
 
 
+def _loop_has(body: list[ast.stmt], kind: type[ast.stmt]) -> bool:
+    """True if a break or continue in this body belongs to the loop around it.
+
+    Nested loops own their own, and a nested function cannot reach the loop.
+    """
+    pending: list[ast.AST] = list(body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, kind):
+            return True
+        if isinstance(
+            node, ast.For | ast.While | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+        ):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _contains_return(body: list[ast.stmt]) -> bool:
+    """True if a return in this body leaves the function around it."""
+    pending: list[ast.AST] = list(body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Return):
+            return True
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _is_catch_all(node: ast.expr) -> bool:
+    if isinstance(node, ast.Tuple):
+        return all(_is_catch_all(element) for element in node.elts)
+    return isinstance(node, ast.Name) and node.id in {"Exception", "BaseException"}
+
+
+def _callee_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else "Exception"
+
+
+def _without_finally(node: ast.Try) -> ast.Try:
+    inner = ast.Try(body=node.body, handlers=node.handlers, orelse=node.orelse, finalbody=[])
+    return ast.copy_location(inner, node)
+
+
 def _is_none(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
@@ -1537,7 +1796,9 @@ def _flatten(body: list[lua.Stat]) -> list[lua.Stat]:
             stat.branches = [(t, _flatten(b)) for t, b in stat.branches]
             stat.orelse = _flatten(stat.orelse)
             out.append(stat)
-        elif isinstance(stat, lua.While | lua.NumericFor | lua.GenericFor | lua.LocalFunction):
+        elif isinstance(
+            stat, lua.While | lua.NumericFor | lua.GenericFor | lua.LocalFunction | lua.Repeat
+        ):
             stat.body = _flatten(stat.body)
             out.append(stat)
         else:
@@ -1648,6 +1909,8 @@ def compile_function(
         parts.append(_OR_HELPER.rstrip())
     if compiler.needs_and:
         parts.append(_AND_HELPER.rstrip())
+    if compiler.needs_errmsg:
+        parts.append(_ERRMSG_HELPER.rstrip())
     parts.append(lua.emit(prelude + statements).rstrip())
 
     return CompiledScript(
