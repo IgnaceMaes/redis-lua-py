@@ -33,10 +33,40 @@ the top of the script, so it does not silently read back `nil`.
 
 Use an f-string, which compiles to Lua's `..`.
 
-## `and` / `or` work only in conditions
+## `and`, `or` and conditional expressions are closed
 
-In Python they return an operand, not a boolean, and that does not survive the
-truthiness difference. Use an `if`.
+In Python, `a or b` returns one of its operands, chosen by Python's
+truthiness. Lua's own `or` uses Lua's truthiness, where `0` and `''` are true,
+so the Lua idiom `tonumber(x) or 0` means something different there.
+
+A right side that is a name or a literal compiles to a small `__or` / `__and`
+helper. Anything else is wrapped in a function called on the spot, so that it
+only runs when Python would run it. `flag or redis.incr(k)` does not
+increment when `flag` is set.
+
+`a if c else b` compiles to `c and a or b` when `a` is a literal. Otherwise it
+becomes the same kind of function, because `c and a or b` is wrong whenever
+`a` can be false or nil.
+
+## Dicts iterate in no particular order
+
+`.items()`, `.keys()` and `.values()` compile to Lua's `pairs()`, which visits
+entries in no fixed order. Sort the result if the order reaches the caller.
+
+Iterating a dict directly with `for k in d` walks its array part, which a dict
+does not have, so the loop never runs. Say `.keys()`.
+
+## Redis replies are flat lists, not dicts
+
+To Lua, `HGETALL` returns `[field, value, field, value, ...]`, not a table
+keyed by field, so `.items()` on it does not mean what it would in redis-py.
+Walk it in pairs instead:
+
+```python
+fields = redis.hgetall(k)
+for i in range(0, len(fields), 2):
+    redis.hset(copy, fields[i], fields[i + 1])
+```
 
 ## There is no `continue`
 

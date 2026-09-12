@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import difflib
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, overload
 from weakref import WeakKeyDictionary
@@ -50,6 +50,25 @@ def encode(name: str, value: object) -> str | bytes | memoryview:
     )
 
 
+def _items(name: str, value: object) -> list[object]:
+    """The elements passed for a list parameter.
+
+    A string is iterable too, and splitting a key into characters is never
+    what was meant, so it is refused rather than spread.
+    """
+    if isinstance(value, str | bytes | memoryview) or not isinstance(value, Iterable):
+        raise ScriptArgumentError(
+            f"argument {name!r} takes a list, got a {type(value).__name__}. "
+            "Wrap a single value in a list."
+        )
+    return list(value)
+
+
+def _is_cluster_pipeline(client: object) -> bool:
+    cls = type(client)
+    return cls.__name__ == "ClusterPipeline" and cls.__module__.startswith("redis.")
+
+
 @dataclass(frozen=True)
 class CompiledScript(Generic[R]):
     """A Python function compiled to Lua, callable against a Redis client.
@@ -71,6 +90,10 @@ class CompiledScript(Generic[R]):
     args: tuple[str, ...]
     doc: str | None = None
     source: str = ""
+    #: The ``list[Key]`` parameter, whose elements fill the rest of KEYS.
+    variadic_key: str | None = None
+    #: The list parameter whose elements fill the rest of ARGV.
+    variadic_arg: str | None = None
     _registry: WeakKeyDictionary[Any, Any] = field(
         default_factory=WeakKeyDictionary, compare=False, repr=False
     )
@@ -85,6 +108,11 @@ class CompiledScript(Generic[R]):
 
     def __call__(self, client: Any, /, *positional: object, **keyword: object) -> Any:
         keys, argv = self.resolve(*positional, **keyword)
+        if _is_cluster_pipeline(client):
+            # redis-py refuses EVALSHA on a cluster pipeline, and a queued
+            # EVALSHA could not recover from NOSCRIPT at execute time anyway,
+            # so the source travels with the command.
+            return client.eval(self.lua, len(keys), *keys, *argv)
         return self._for(client)(keys=keys, args=argv, client=client)
 
     @overload
@@ -126,10 +154,19 @@ class CompiledScript(Generic[R]):
         if missing:
             raise ScriptArgumentError(f"{self.name}() is missing argument(s): {', '.join(missing)}")
 
-        return (
-            [values[k] for k in self.keys],
-            [encode(a, values[a]) for a in self.args],
-        )
+        keys: list[Any] = []
+        for k in self.keys:
+            if k == self.variadic_key:
+                keys.extend(_items(k, values[k]))
+            else:
+                keys.append(values[k])
+        argv: list[Any] = []
+        for a in self.args:
+            if a == self.variadic_arg:
+                argv.extend(encode(a, item) for item in _items(a, values[a]))
+            else:
+                argv.append(encode(a, values[a]))
+        return keys, argv
 
     def _for(self, client: Any) -> Any:
         """Get the redis-py Script bound to this client, registering it once.

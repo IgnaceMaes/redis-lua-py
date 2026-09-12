@@ -3,23 +3,35 @@
 A script body is Python that Python never runs, so only the part of the
 language with a faithful Lua meaning is accepted.
 
-**Supported:** assignment, augmented assignment, `if`/`elif`/`else`,
-`for ... in` over a table or `range()`, `while`, `break`, `return`,
-comparisons, arithmetic, f-strings, list and dict literals, `len()`,
-`.append()`, `int()`, `float()`, `str()`, `min()`, `max()`, `abs()`,
-module-level constants, and calls into `redis` and `cjson`.
+**Supported:**
+
+- **Statements:** assignment, including unpacking (`a, b = b, a`);
+  augmented assignment; `if`/`elif`/`else`; `while`; `break`; `return`.
+- **Loops:** `for ... in` over a table, `range()`, `enumerate()`, or a dict's
+  `.items()`, `.keys()` and `.values()`, binding a name or a tuple of names.
+- **Helper functions** defined with `def` at the top level of the body. They
+  can call each other and themselves.
+- **Expressions:** comparisons; arithmetic; `and`/`or`, and `a if c else b`,
+  both as values; f-strings; list and dict literals.
+- **Builtins and methods:** `len()`, `int()`, `float()`, `str()`, `min()`,
+  `max()`, `abs()`, `.append()`, `.insert()`, `.pop()` and `str.join()`.
+- **The `math` module:** `floor`, `ceil`, `sqrt`, `fabs`, `fmod`, `exp`,
+  `log`, `log10` and `pow`, imported either way.
+- **Calls:** into `redis` and `cjson`, with `*xs` allowed as the last argument.
+- **Parameters:** `list[Key]` and `list[...]`, for a variable number of keys
+  and arguments.
+- **Module-level constants.**
 
 Everything else raises
 [`UnsupportedSyntax`](errors.md#unsupportedsyntax) when the module is imported,
 with a caret under the line at fault:
 
 ```
-'and'/'or' are only supported in an if or while condition
+Lua 5.1 has no 'continue' statement
   File "/srv/app/limits.py", line 12
-    flag = a and b
-           ^
-  hint: In Python these return an operand, which does not survive the
-  difference in truthiness. Use an if statement instead.
+    continue
+    ^
+  hint: Invert the condition and put the rest of the loop body inside the if.
 ```
 
 Failing at import, loudly, is deliberate. A body that looks like Python but is
