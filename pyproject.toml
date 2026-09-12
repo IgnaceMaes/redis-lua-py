@@ -3,7 +3,7 @@ name = "redis-lua-py"
 version = "0.2.1"
 description = "Write Redis Lua scripts as real Python functions, not strings."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ignace Maes" }]
@@ -11,6 +11,7 @@ keywords = ["redis", "lua", "eval", "evalsha", "transpiler", "scripting"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -18,7 +19,7 @@ classifiers = [
     "Topic :: Database",
     "Typing :: Typed",
 ]
-dependencies = ["redis>=5.0"]
+dependencies = ["redis>=4.2"]
 
 [project.urls]
 Homepage = "https://ignacemaes.com/redis-lua-py/"
@@ -35,6 +36,8 @@ dev = [
     "ruff>=0.16",
     "mypy>=1.15",
     "zensical>=0.0.61",
+    # typing.assert_type, for tests/test_typing.py, arrived in Python 3.11.
+    "typing_extensions>=4.2; python_version < '3.11'",
 ]
 
 [build-system]
@@ -52,7 +55,7 @@ addopts = "-q"
 [tool.ruff]
 src = ["src", "tests"]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "N", "C4", "PT"]
@@ -68,7 +71,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "N", "C4", "PT"]
 "tests/*.py" = ["B007", "F841", "SIM108"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 strict = true
 # test_typing.py carries assert_type() claims about what a call returns, which
 # are only worth anything if mypy actually reads them.

@@ -8,13 +8,18 @@ pyproject.toml, which lists this file alongside ``src``.
 
 from __future__ import annotations
 
-from typing import assert_type
+import sys
 
 import redis
 import redis.asyncio
 
 from redis_lua_py import BoundScript, CompiledScript, Key, script
 from redis_lua_py import redis as r
+
+if sys.version_info >= (3, 11):
+    from typing import assert_type
+else:
+    from typing_extensions import assert_type
 
 
 @script

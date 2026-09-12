@@ -46,11 +46,11 @@ async def async_client() -> AsyncIterator[Any]:
         conn = redis.asyncio.Redis.from_url(REDIS_URL)
         await conn.flushdb()
         yield conn
-        await conn.aclose()
     else:
         conn = fakeredis.aioredis.FakeRedis()
         yield conn
-        await conn.aclose()
+    # aclose arrived in redis-py 5, and close is deprecated from then on.
+    await (conn.aclose() if hasattr(conn, "aclose") else conn.close())
 
 
 @pytest.fixture

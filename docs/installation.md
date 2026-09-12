@@ -12,8 +12,8 @@ pip install redis-lua-py
 
 ## Requirements
 
-- Python 3.11 or newer
-- [redis-py](https://github.com/redis/redis-py) 5.0 or newer — the only
+- Python 3.10 or newer
+- [redis-py](https://github.com/redis/redis-py) 4.2 or newer — the only
   dependency, and installed with the package
 
 Script caching, `EVALSHA` and the `NOSCRIPT` reload are handled by redis-py's

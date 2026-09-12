@@ -21,11 +21,12 @@ T = TypeVar("T")
 class AsyncClient(Protocol):
     """Enough of an async redis-py client to tell it from a sync one.
 
-    Only used to type the two shapes of call. ``aclose`` is the discriminator
-    because every async client has one and no sync client does.
+    Only used to type the two shapes of call. ``__aenter__`` is the
+    discriminator because every async client has one and no sync client does,
+    on every supported redis-py -- ``aclose`` only arrived in redis-py 5.
     """
 
-    async def aclose(self) -> None: ...  # pragma: no cover - a typing shape
+    async def __aenter__(self) -> Any: ...  # pragma: no cover - a typing shape
 
     def register_script(self, script: str) -> Any: ...  # pragma: no cover
 

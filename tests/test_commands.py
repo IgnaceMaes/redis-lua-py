@@ -170,13 +170,14 @@ def test_the_table_matches_the_commands_redis_py_exposes() -> None:
     }  # fmt: skip
     # Namespaces for module commands, which are spelled with a dot (JSON.GET)
     # and so can only be reached through redis.call anyway.
-    modules = {"bf", "cf", "cms", "ft", "json", "tdigest", "topk", "ts", "vset"}
+    modules = {"bf", "cf", "cms", "ft", "graph", "json", "tdigest", "topk", "ts", "vset"}
     # Container commands: valid as attributes only with a subcommand.
     containers = {"client", "cluster", "command", "object", "pubsub", "sentinel"}
     # redis-py helpers that are not commands, and STRALGO, gone since Redis 7.
     not_commands = {"keyspace_notifications", "stralgo"}
     expected_failures = modules | containers | not_commands
 
+    checked = set()
     refused = set()
     for name, member in inspect.getmembers(redis_py.Redis):
         if name.startswith("_") or not callable(member):
@@ -185,9 +186,12 @@ def test_the_table_matches_the_commands_redis_py_exposes() -> None:
             continue
         if name.startswith(("get_", "set_")):
             continue  # get_encoder, set_response_callback and friends
+        checked.add(name)
         try:
             compiler.command_tokens(node, name)  # type: ignore[arg-type]
         except UnsupportedSyntax:
             refused.add(name)
 
-    assert refused == expected_failures
+    # Each redis-py release exposes a different set of these (graph left, vset
+    # arrived), so only the exceptions this one actually has are expected.
+    assert refused == expected_failures & checked
