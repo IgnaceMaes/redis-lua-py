@@ -14,7 +14,7 @@
 
 <p align="center">
   Write Redis Lua scripts as real Python functions, not as strings.<br>
-  Compiled at import, checked by <code>mypy</code>, sent with <code>EVALSHA</code>. Sync and async redis-py.
+  Compiled at import, checked by <code>mypy</code>, sent with <code>EVALSHA</code>. Sync and async redis-py, and coredis.
 </p>
 
 <p align="center">
@@ -115,7 +115,7 @@ script cache is cold once per script rather than once per environment.
   a script is a `CompiledScript[R]`, and an async client gives you
   `Awaitable[R]`.
 - **[Sync and async](https://ignacemaes.com/redis-lua-py/guide/async/)** from
-  the same script object, and
+  the same script object, with redis-py or coredis, and
   **[`bind`](https://ignacemaes.com/redis-lua-py/guide/binding-a-client/)** when
   passing the client every time gets repetitive.
 - **[Build-time generation](https://ignacemaes.com/redis-lua-py/guide/build-time/)**

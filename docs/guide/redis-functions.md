@@ -34,7 +34,8 @@ peek(client, key="user:42")  # FCALL_RO peek 1 user:42
 
 A function is called like a script: pass a sync client and you get a value,
 an async one and you get an awaitable, and [`bind`](binding-a-client.md)
-works the same way.
+works the same way. With a [coredis](async.md#coredis) client, the call goes
+through its `fcall` or `fcall_ro`, and loading through its `function_load`.
 
 ## Loading
 
@@ -51,10 +52,11 @@ limits.load(client)
 
     A call queued in a pipeline cannot load the library halfway through
     `execute()`. Call `load()` before queueing calls to a library the server
-    may not have yet.
+    may not have yet. The same goes for a coredis pipeline, which runs when its
+    `async with` block ends: `await limits.load(client)` before entering it.
 
-On Redis Cluster, redis-py sends `FUNCTION LOAD` to every primary, and routes
-`FCALL` on the function's keys, as it does a script.
+On Redis Cluster, redis-py and coredis send `FUNCTION LOAD` to every primary,
+and route `FCALL` on the function's keys, as they do a script.
 
 ## What the library looks like
 

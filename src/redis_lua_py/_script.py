@@ -18,8 +18,9 @@ R = TypeVar("R")
 #: What calling a bound script produces -- ``R``, or an awaitable of it.
 T = TypeVar("T")
 
-#: Enough of an async redis-py client to tell it from a sync one. It lives with
-#: the rest of the call path in ``_portable``, which generated modules copy.
+#: Enough of an async client, redis-py's or coredis's, to tell it from a sync
+#: one. It lives with the rest of the call path in ``_portable``, which
+#: generated modules copy.
 AsyncClient = _AsyncClient
 
 

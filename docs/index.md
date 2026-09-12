@@ -6,7 +6,7 @@ hide:
 # redis-lua-py
 
 Write Redis Lua scripts as real Python functions, not as strings. Compiled at
-import, checked by `mypy`, sent with `EVALSHA`. Sync and async redis-py.
+import, checked by `mypy`, sent with `EVALSHA`. Sync and async redis-py, and coredis.
 
 ```python
 from redis_lua_py import Key, redis, script
@@ -68,7 +68,8 @@ requirements, or go straight to the [Quickstart](quickstart.md).
 - **Typed on the caller's side.** A script is a `CompiledScript[R]`, so
   `rate_limit(...)` returns an `int` rather than `Any`, and an async client
   gives you `Awaitable[R]`. See [What the caller gets](guide/return-values.md).
-- **Sync and async from the same script object.** See [Async](guide/async.md).
+- **Sync and async from the same script object**, with redis-py or coredis.
+  See [Async](guide/async.md).
 - **Binary-safe throughout.** Nothing here decodes. See
   [Binary values](guide/binary-values.md).
 

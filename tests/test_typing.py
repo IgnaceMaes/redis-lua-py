@@ -9,6 +9,7 @@ pyproject.toml, which lists this file alongside ``src``.
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
 
 import redis
 import redis.asyncio
@@ -21,6 +22,10 @@ if sys.version_info >= (3, 11):
     from typing import assert_type
 else:
     from typing_extensions import assert_type
+
+if TYPE_CHECKING:
+    # Only mypy reads it, which keeps pytest collecting this file without coredis.
+    import coredis
 
 
 @script
@@ -76,6 +81,20 @@ def check_a_library_function(client: redis.Redis) -> None:
 
 async def check_an_async_library_function(client: redis.asyncio.Redis) -> None:
     assert_type(await counted(client, k="x"), int)
+
+
+async def check_a_coredis_client(client: coredis.Redis[bytes]) -> None:
+    assert_type(await counter(client, k="x"), int)
+    assert_type(await counter.bind(client)(k="x"), int)
+    assert_type(await counted(client, k="x"), int)
+    assert_type(await counted.bind(client)(k="x"), int)
+    assert_type(await generated_scripts.rate_limit(client, key="x", limit=1, ttl=1), int)
+
+
+async def check_a_coredis_pipeline(client: coredis.Redis[bytes]) -> None:
+    async with client.pipeline() as pipe:
+        queued = counter(pipe, k="x")
+    assert_type(await queued, int)
 
 
 def check_a_generated_function(client: redis.Redis) -> None:

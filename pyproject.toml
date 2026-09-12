@@ -41,6 +41,9 @@ dev = [
     "zensical>=0.0.61",
     # typing.assert_type, for tests/test_typing.py, arrived in Python 3.11.
     "typing_extensions>=4.2; python_version < '3.11'",
+    # Tested against, never required: coredis shapes a command differently
+    # from redis-py, and tests/test_coredis.py runs the same scripts through it.
+    "coredis>=6.9",
 ]
 
 [build-system]

@@ -34,9 +34,17 @@ def _check_name(kind: str, name: str) -> str:
     return name
 
 
+def _is_coredis(client: object) -> bool:
+    # Told apart by where its classes live, so that coredis stays optional and
+    # is never imported here.
+    return type(client).__module__.startswith("coredis.")
+
+
 def _is_pipeline(client: object) -> bool:
     cls = type(client)
-    return cls.__name__ in {"Pipeline", "ClusterPipeline"} and cls.__module__.startswith("redis.")
+    return cls.__name__ in {"Pipeline", "ClusterPipeline"} and cls.__module__.startswith(
+        ("redis.", "coredis.")
+    )
 
 
 def _function_missing(error: BaseException) -> bool:
@@ -48,7 +56,8 @@ def _modern_function_load(client: object) -> Any:
 
     Early redis-py releases, 4.2.0 among them, still have the Redis 7
     release-candidate signature, function_load(engine, library, code), which
-    no released Redis accepts.
+    no released Redis accepts. coredis names the same first parameter
+    ``function_code``.
     """
     function_load = getattr(client, "function_load", None)
     if function_load is None:
@@ -57,7 +66,17 @@ def _modern_function_load(client: object) -> Any:
         parameters = list(inspect.signature(function_load).parameters)
     except (TypeError, ValueError):  # a callable without an inspectable signature
         return None
-    return function_load if parameters[:1] == ["code"] else None
+    return function_load if parameters[:1] in (["code"], ["function_code"]) else None
+
+
+def _send(client: Any, command: str, function: str, keys: list[Any], argv: list[Any]) -> Any:
+    """Send FCALL or FCALL_RO as the client spells it."""
+    if _is_coredis(client):
+        # coredis's execute_command takes a prepared request, not the words of
+        # a command, and it only prepares one through a method per command.
+        method = client.fcall_ro if command == "FCALL_RO" else client.fcall
+        return method(function, keys=keys, args=argv)
+    return client.execute_command(command, function, len(keys), *keys, *argv)
 
 
 class Library:
@@ -149,8 +168,8 @@ class Library:
         """
         function_load = _modern_function_load(client)
         if function_load is not None:
-            # Preferred where it exists, since redis-py routes it to every
-            # primary of a cluster.
+            # Preferred where it exists, since redis-py and coredis both route
+            # it to every primary of a cluster.
             return function_load(self.lua, replace=True)
         return client.execute_command("FUNCTION", "LOAD", "REPLACE", self.lua)
 
@@ -158,30 +177,37 @@ class Library:
         self, client: Any, command: str, function: str, keys: list[Any], argv: list[Any]
     ) -> Any:
         """Send FCALL or FCALL_RO, loading the library and retrying if it is missing."""
-        args = (command, function, len(keys), *keys, *argv)
         if _is_pipeline(client):
             # A queued call cannot load the library once it turns out to be
             # missing; load() it before queueing.
-            return client.execute_command(*args)
+            return _send(client, command, function, keys, argv)
         try:
-            result = client.execute_command(*args)
+            result = _send(client, command, function, keys, argv)
         except Exception as error:
             if not _function_missing(error):
                 raise
             self.load(client)
-            return client.execute_command(*args)
+            return _send(client, command, function, keys, argv)
         if inspect.isawaitable(result):
-            return self._call_async(client, result, args)
+            return self._call_async(client, result, command, function, keys, argv)
         return result
 
-    async def _call_async(self, client: Any, pending: Awaitable[Any], args: tuple[Any, ...]) -> Any:
+    async def _call_async(
+        self,
+        client: Any,
+        pending: Awaitable[Any],
+        command: str,
+        function: str,
+        keys: list[Any],
+        argv: list[Any],
+    ) -> Any:
         try:
             return await pending
         except Exception as error:
             if not _function_missing(error):
                 raise
             await self.load(client)
-            return await client.execute_command(*args)
+            return await _send(client, command, function, keys, argv)
 
     def __repr__(self) -> str:
         return f"<library {self.name} ({', '.join(self._functions)})>"
