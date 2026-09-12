@@ -7,6 +7,16 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.5.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.4.0...v0.5.0) (2026-09-12)
+
+
+### Added
+
+* compile continue, try/except/else/finally, raise and assert ([#11](https://github.com/IgnaceMaes/redis-lua-py/issues/11)) ([aeca575](https://github.com/IgnaceMaes/redis-lua-py/commit/aeca5757fffe42e88b49b18fa4d3fe91897fad2e))
+* compile membership, slicing, string methods and formatting, and key variables ([#13](https://github.com/IgnaceMaes/redis-lua-py/issues/13)) ([4880c81](https://github.com/IgnaceMaes/redis-lua-py/commit/4880c8156d849755259dea9a8c29cf69392ecd7e))
+* compile redis functions libraries, and script flags ([#15](https://github.com/IgnaceMaes/redis-lua-py/issues/15)) ([5980f03](https://github.com/IgnaceMaes/redis-lua-py/commit/5980f0317acbe9a7a96ffaff029f2d76143b7e32))
+* generate lua ahead of time for code that ships without redis-lua-py ([#14](https://github.com/IgnaceMaes/redis-lua-py/issues/14)) ([83d6b9d](https://github.com/IgnaceMaes/redis-lua-py/commit/83d6b9da0b540cefc0be9ec51fbead54c4d0fade))
+
 ## [0.4.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.3.0...v0.4.0) (2026-09-12)
 
 
