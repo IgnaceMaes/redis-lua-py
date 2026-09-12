@@ -32,11 +32,15 @@ class CallCompiler(ExpressionCompiler):
             return self.math_call(node, math_attr, args)
 
         match node.func:
-            case ast.Name(id=name) if name in self.local_functions:
+            case ast.Name(id=name) if self.is_callable(name):
                 return lua.Call(lua.Name(name), args)
             case ast.Name(id="len"):
                 if len(args) != 1:
                     self.fail(node, "len() takes exactly one argument")
+                if self.kind(node.args[0]) == "dict":
+                    # Lua's # only counts the positions of a list.
+                    self.helpers.add("__dictlen")
+                    return lua.Call(lua.Name("__dictlen"), args)
                 return lua.UnOp("#", args[0])
             case ast.Name(id=name) if name in BUILTIN_FUNCS:
                 return lua.Call(lua.Name(BUILTIN_FUNCS[name]), args)
@@ -104,18 +108,26 @@ class CallCompiler(ExpressionCompiler):
     def list_method(self, node: ast.Call, receiver: ast.Name) -> lua.Expr:
         """``xs.pop()`` and ``xs.insert(i, x)``, with the index shifted to 1-based."""
         assert isinstance(node.func, ast.Attribute)
+        if self.kind(receiver) == "dict":
+            self.fail(
+                node,
+                f"dict.{node.func.attr}() is not supported",
+                hint="list.pop() and list.insert() compile; read a dict with d.get(key).",
+            )
         target = self.expr(receiver)
         if node.func.attr == "pop":
             if not node.args:
                 return lua.Call(lua.Name("table.remove"), (target,))
             if len(node.args) == 1:
-                return lua.Call(lua.Name("table.remove"), (target, self.index(node.args[0])))
+                return lua.Call(
+                    lua.Name("table.remove"), (target, self.index(node.args[0], "list"))
+                )
             self.fail(node, "pop() takes at most one argument")
         if len(node.args) != 2:
             self.fail(node, "insert() takes exactly two arguments")
         return lua.Call(
             lua.Name("table.insert"),
-            (target, self.index(node.args[0]), self.expr(node.args[1])),
+            (target, self.index(node.args[0], "list"), self.expr(node.args[1])),
         )
 
     def string_method(

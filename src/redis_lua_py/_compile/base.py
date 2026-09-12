@@ -80,12 +80,16 @@ class CompilerBase(ABC):
         self.first_names: dict[int, list[str]] = {}
         # The runtime helpers, from helpers.HELPERS, that this body calls.
         self.helpers: set[str] = set()
-        # What a parameter or loop variable is known to be: "str" or "num".
+        # What a parameter or loop variable is known to be; see kind().
         self.kinds: dict[str, str] = {}
         # Every value assigned to each name, to work out what a local holds.
         self.values: dict[str, list[ast.expr]] = {}
         # Names bound in ways that say nothing about their type.
         self.opaque: set[str] = set()
+        # The names for loops bind, which Lua scopes to the loop itself.
+        self.loop_targets: set[str] = set()
+        # Parameters of a function defined in the body, which may hold a function.
+        self.callable_params: set[str] = set()
         self._resolving: set[str] = set()
         # What a break or continue would leave: a loop, or None for the body of
         # a try, which runs as a function and so is out of any loop's reach.
@@ -227,15 +231,23 @@ class CompilerBase(ABC):
             return func.attr
         return None
 
+    def is_callable(self, name: str) -> bool:
+        """True for a helper, a name bound to a lambda, or a parameter of either."""
+        if name in self.local_functions or name in self.callable_params:
+            return True
+        return name in self.known and self.name_kind(name) == "func"
+
     # ------------------------------------------------------------------ kinds
 
     def kind(self, node: ast.expr) -> str | None:
-        """What an expression is statically known to be: "str", "num" or None.
+        """What an expression is statically known to be, or None.
 
-        Lua does not care, but three translations do. A subscript is shifted to
-        1-based only for a number, `+` is concatenation only for a string, and a
-        format spec aligns a string and a number differently. None means "only
-        known at runtime", and the translation then decides there, or refuses.
+        One of "str", "num", "list", "dict" or "func". Lua does not care, but
+        several translations do: a subscript is shifted to 1-based for a list
+        and not for a dict, `+` joins strings and adds numbers, `in` searches a
+        list and looks up a dict's keys, and a format spec aligns a string and
+        a number differently. None means "only known at runtime", and the
+        translation then decides there, or refuses.
         """
         match node:
             case ast.Constant(value=bool()):
@@ -246,6 +258,12 @@ class CompilerBase(ABC):
                 return "num"
             case ast.JoinedStr():
                 return "str"
+            case ast.List() | ast.Tuple():
+                return "list"
+            case ast.Dict():
+                return "dict"
+            case ast.Lambda():
+                return "func"
             case ast.Name(id=name):
                 return self.name_kind(name)
             case ast.UnaryOp(op=ast.USub() | ast.UAdd(), operand=operand):
@@ -256,9 +274,12 @@ class CompilerBase(ABC):
             case ast.IfExp(body=then, orelse=otherwise):
                 a, b = self.kind(then), self.kind(otherwise)
                 return a if a == b else None
+            case ast.Subscript(value=value, slice=ast.Slice()):
+                inner = self.kind(value)
+                return inner if inner in {"str", "list"} else None
             case ast.Subscript(value=value):
                 return "str" if self.kind(value) == "str" else None
-            case ast.Call(func=ast.Name(id=name)) if name not in self.local_functions:
+            case ast.Call(func=ast.Name(id=name)) if not self.is_callable(name):
                 if name in {"str", "tostring", "chr"}:
                     return "str"
                 if name in {"int", "float", "tonumber", "len", "abs", "ord"}:
@@ -271,6 +292,8 @@ class CompilerBase(ABC):
                     return None
                 if attr in {"upper", "lower", "strip", "lstrip", "rstrip", "replace", "join"}:
                     return "str"
+                if attr == "split":
+                    return "list"
                 return "num" if attr == "find" else None
             case ast.Attribute():
                 parts = dotted_name(node)
@@ -313,3 +336,7 @@ class CompilerBase(ABC):
     @abstractmethod
     def block(self, body: list[ast.stmt]) -> list[lua.Stat]:
         """Compile a list of statements; see ``statements``."""
+
+    @abstractmethod
+    def lambda_expr(self, node: ast.Lambda) -> lua.Expr:
+        """Compile a lambda; see ``statements``."""

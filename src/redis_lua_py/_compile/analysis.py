@@ -228,14 +228,26 @@ def value_kind(value: object) -> str | None:
 def binop_kind(op: ast.operator, left: str | None, right: str | None) -> str | None:
     """The kind of a binary operation from its operands' kinds.
 
-    "?" stands for a name still being worked out, as in `n = n + 1`: it takes
-    whatever kind its other assignments give it.
+    Python only adds a number to a number and a string to a string, so for `+`
+    one known side is enough. "?" stands for a name still being worked out, as
+    in `n = n + 1`: it takes whatever kind its other assignments give it.
     """
-    if isinstance(op, ast.Add | ast.Mult) and "str" in (left, right):
+    sides = (left, right)
+    if isinstance(op, ast.Add):
+        if "str" in sides:
+            return "str"
+        if "num" in sides:
+            return "num"
+        if left == right == "list":
+            return "list"
+        return "?" if "?" in sides else None
+    if isinstance(op, ast.Mult) and "str" in sides:
         return "str"
-    if isinstance(op, ast.Mod) and left == "str":
-        return "str"
-    if {left, right} <= {"num", "?"}:
+    if isinstance(op, ast.Mod):
+        return left if left in {"str", "num", "?"} else None
+    if isinstance(op, ast.Sub | ast.Div | ast.FloorDiv | ast.Pow):
+        return "num"
+    if set(sides) <= {"num", "?"}:
         return "?" if left == right == "?" else "num"
     return None
 

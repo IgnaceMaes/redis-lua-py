@@ -23,22 +23,27 @@ Lua tables are 1-based. `items[0]` compiles to `items[1]`. Write Python indices
 and let the compiler shift them.
 
 A dict key must not be shifted, and Lua cannot tell a list from a dict. So the
-compiler looks at the subscript:
+compiler looks first at what is subscripted. A dict is indexed by its keys as
+they are, integer keys included, and a list's index is shifted by one. When
+that is not known, it looks at the subscript:
 
 - a string literal, or a value known to be a string, is used as it is;
 - an integer literal, or a value known to be a number, is shifted by one;
 - anything else goes through a small `__key` helper, which shifts numbers and
   leaves everything else alone, at runtime.
 
-A value is known to be a string or a number from its annotation, a literal,
-the builtin or method that produced it, a `range()` or `enumerate()` loop
-variable, or every assignment to the name agreeing. Integer keys in a dict
-are treated as positions; use string keys.
+A value's type is known from its annotation, a literal, the builtin, method or
+operator that produced it, a `range()` or `enumerate()` loop variable, or
+every assignment to the name agreeing. So after `counts = {}`, `counts[0]` is
+the key `0`. A table that comes from elsewhere -- a Redis reply,
+`cjson.decode`, a helper's parameter -- is not known, and an integer subscript
+on it is taken to be a position.
 
 `items[-1]` compiles to `items[#items]`, which needs a name to count back from.
 Indexing a string gives a one-character string, as it does in Python, through
-`string.sub`. Slices, `v[i:j]`, work on lists and strings, with negative and
-missing bounds; a slice with a step is refused.
+`string.sub`. Slices, `v[i:j]` and `v[i:j:k]`, work on lists and strings, with
+negative and missing bounds, and bounds are clamped exactly as Python clamps
+them. A negative step walks backwards, so `word[::-1]` reverses.
 
 ## Assignment scope is closed
 
@@ -50,8 +55,10 @@ the top of the script, so it does not silently read back `nil`.
 
 Lua's `+` is only arithmetic. It will add `"1" + "2"` to `3`. So `+`
 compiles to Lua's `..` wherever either side is known to be a string, as
-above, and `"=" * n` to `string.rep`. Where neither side is known, `+` stays
-arithmetic; use an f-string to concatenate two values of unknown type.
+above, to Lua's `+` wherever either side is known to be a number, and
+`"=" * n` to `string.rep`. Where neither side is known, as with two Redis
+replies, a small `__add` helper decides at runtime: two strings are joined,
+two lists are joined into a new list, and anything else is added.
 
 The string methods compile to Lua's string library, and to small helpers where
 Python means something Lua's own functions do not:
@@ -60,7 +67,9 @@ Python means something Lua's own functions do not:
   substring. `string.find` would read `.` as a pattern.
 - **`strip`, `lstrip` and `rstrip`** strip whitespace, and take no argument.
 - **`x in s`** is a substring test on a string. On a list it is an element test;
-  on a dict it is a key test.
+  on a dict it is a key test. A table whose type is not known, such as a
+  decoded JSON value, is taken to be a dict when any of its keys is not a list
+  position, and a list otherwise.
 
 `"%s: %d" % (name, n)` and f-string format specs such as `{price:8.2f}` compile
 to `string.format`. Width, precision, sign and zero padding are supported. A
@@ -88,8 +97,10 @@ becomes the same kind of function, because `c and a or b` is wrong whenever
 `.items()`, `.keys()` and `.values()` compile to Lua's `pairs()`, which visits
 entries in no fixed order. Sort the result if the order reaches the caller.
 
-Iterating a dict directly with `for k in d` walks its array part, which a dict
-does not have, so the loop never runs. Say `.keys()`.
+`for k in d` walks the keys of a dict the compiler knows to be one, as
+`.keys()` does, and `len(d)` counts them. On a table whose type is not known,
+say `.keys()`: there, `for k in d` and `len(d)` see only list positions, which
+a dict does not have.
 
 ## Redis replies are flat lists, not dicts
 
@@ -149,7 +160,10 @@ kept, whether or not something catches it.
 
 ## A loop variable does not outlive its loop
 
-Unlike in Python.
+Unlike in Python. Lua also gives each step of a loop a variable of its own,
+which a function defined inside the loop would keep, where in Python every
+step shares one. So a `lambda` or a helper function that reads a loop variable
+is refused; pass the value in as a parameter instead.
 
 ## A nil inside a returned table truncates the reply
 
