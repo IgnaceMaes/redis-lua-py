@@ -7,6 +7,17 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.2.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.1.0...v0.2.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* a command name Redis does not have is now refused at import rather than compiled, and a literal `None` inside a returned table is refused. Both previously compiled to Lua that failed, or silently truncated, at runtime. The header's source path is now repo-relative, which changes the SHA of every script — once.
+
+### Added
+
+* check command names, fold module constants, and type the caller's side ([#2](https://github.com/IgnaceMaes/redis-lua-py/issues/2)) ([0ef4ed2](https://github.com/IgnaceMaes/redis-lua-py/commit/0ef4ed23dd3cef8616ab5132d7a9089e38bb518a))
+
 ## 0.1.0 (2026-09-12)
 
 First release.
