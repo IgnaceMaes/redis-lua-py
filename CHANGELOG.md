@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.6.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.5.1...v0.6.0) (2026-09-12)
+
+
+### Added
+
+* generate typed functions that call scripts the way `@script` does ([#18](https://github.com/IgnaceMaes/redis-lua-py/issues/18)) ([8f602f7](https://github.com/IgnaceMaes/redis-lua-py/commit/8f602f7bdf4afaa22c83c63e215ef5d965fbc584))
+
 ## [0.5.1](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.5.0...v0.5.1) (2026-09-12)
 
 
