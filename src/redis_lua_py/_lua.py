@@ -242,7 +242,18 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
         case Bool(value=v):
             return "true" if v else "false"
         case Num(value=v):
-            return repr(v) if isinstance(v, float) else str(v)
+            if isinstance(v, float) and v != v:
+                return "(0/0)"
+            if v in (float("inf"), float("-inf")):
+                # repr() would give `inf`, which Lua reads as an unset global.
+                text = "math.huge" if v > 0 else "-math.huge"
+            else:
+                text = repr(v) if isinstance(v, float) else str(v)
+            # A negative literal under a unary operator would otherwise emit
+            # `--5`, which Lua reads as the start of a comment.
+            if text.startswith("-") and parent_prec >= _UNARY_PRECEDENCE:
+                return f"({text})"
+            return text
         case Str(value=v):
             return quote(v)
         case Bytes(value=v):

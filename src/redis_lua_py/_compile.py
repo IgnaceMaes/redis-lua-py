@@ -37,9 +37,28 @@ _REDIS_DIRECT = frozenset(
         "sha1hex",
         "log",
         "replicate_commands",
+        "set_repl",
         "setresp",
+        "acl_check_cmd",
         "breakpoint",
         "debug",
+    }
+)
+
+# Constants on the `redis` table, for redis.log levels and redis.set_repl.
+_REDIS_CONSTANTS = frozenset(
+    {
+        "LOG_DEBUG",
+        "LOG_VERBOSE",
+        "LOG_NOTICE",
+        "LOG_WARNING",
+        "REPL_ALL",
+        "REPL_AOF",
+        "REPL_REPLICA",
+        "REPL_SLAVE",
+        "REPL_NONE",
+        "REDIS_VERSION",
+        "REDIS_VERSION_NUM",
     }
 )
 
@@ -190,6 +209,12 @@ class _Compiler:
         """
         parts = _dotted_name(node)
         if parts is not None:
+            if (
+                len(parts) == 2
+                and parts[1] in _REDIS_CONSTANTS
+                and self.namespace_kind(parts[0]) == "redis"
+            ):
+                return lua.Index(lua.Name("redis"), lua.Str(parts[1]))
             root = self.globalns.get(parts[0], _UNBOUND)
             # A namespace answers to every attribute with a call stub, and
             # redis-py has a clearer error of its own; neither is a constant.
@@ -251,6 +276,10 @@ class _Compiler:
         top_level = {id(stmt) for stmt in self.func.body}
         for name, assignments in nodes.items():
             self.known.add(name)
+            if name in self.params:
+                # Already a local from the prelude. Declaring it again would
+                # shadow the argument with nil.
+                continue
             # ast.walk is breadth-first, so ask for source order explicitly.
             first = min(assignments, key=lambda n: (n.lineno, n.col_offset))
             if id(first) in top_level:
@@ -402,12 +431,17 @@ class _Compiler:
         left = self.expr(node.left)
 
         if isinstance(op_node, ast.Is | ast.IsNot):
-            if not (isinstance(right_node, ast.Constant) and right_node.value is None):
+            if not _is_none(right_node):
                 self.fail(node, "'is' is only supported against None")
-            # Not `== nil`: Redis reports a missing value to Lua as false.
-            self.needs_isnil = True
-            check: lua.Expr = lua.Call(lua.Name("__isnil"), (left,))
-            return check if isinstance(op_node, ast.Is) else lua.UnOp("not", check)
+            return self.none_check(left, negate=isinstance(op_node, ast.IsNot))
+
+        # `== None` means the same as `is None` to anyone reading it, and
+        # compiling it to `== nil` would never match the false Redis sends.
+        if isinstance(op_node, ast.Eq | ast.NotEq) and (
+            _is_none(right_node) or _is_none(node.left)
+        ):
+            operand = self.expr(right_node) if _is_none(node.left) else left
+            return self.none_check(operand, negate=isinstance(op_node, ast.NotEq))
 
         op = _COMPARE_OPS.get(type(op_node))
         if op is None:
@@ -419,6 +453,12 @@ class _Compiler:
                 else None,
             )
         return lua.BinOp(op, left, self.expr(right_node))
+
+    def none_check(self, operand: lua.Expr, *, negate: bool) -> lua.Expr:
+        # Not `== nil`: Redis reports a missing value to Lua as false.
+        self.needs_isnil = True
+        check: lua.Expr = lua.Call(lua.Name("__isnil"), (operand,))
+        return lua.UnOp("not", check) if negate else check
 
     def fstring(self, node: ast.expr, values: list[ast.expr]) -> lua.Expr:
         parts: list[lua.Expr] = []
@@ -513,6 +553,15 @@ class _Compiler:
             f"method call .{attr}() is not supported",
             hint="Only the redis and cjson namespaces, and list.append(), are available.",
         )
+
+    def namespace_kind(self, name: str) -> str | None:
+        """The namespace a bare name refers to, without any error reporting."""
+        if name in self.known:
+            return None
+        value = self.globalns.get(name, _UNBOUND)
+        if isinstance(value, _Namespace):
+            return value.kind
+        return _RECEIVER_FALLBACK.get(name) if value is _UNBOUND else None
 
     def receiver_kind(self, node: ast.Call, name: str) -> str | None:
         """Work out what the receiver of an attribute call refers to.
@@ -643,8 +692,16 @@ class _Compiler:
 
     def block(self, body: list[ast.stmt]) -> list[lua.Stat]:
         out: list[lua.Stat] = []
+        reachable = True
         for stmt in body:
-            out.extend(self.stmt(stmt))
+            # Everything is still compiled, so a mistake is reported wherever it
+            # sits. But Lua refuses to load a statement after `return`, and
+            # Python would never run one, so the unreachable tail is dropped.
+            compiled = self.stmt(stmt)
+            if reachable:
+                out.extend(compiled)
+            if isinstance(stmt, ast.Return | ast.Break):
+                reachable = False
         return out
 
     def stmt(self, node: ast.stmt) -> list[lua.Stat]:
@@ -985,6 +1042,10 @@ def _as_literal(value: object) -> lua.Expr | None:
             return lua.Nil()
         case _:
             return None
+
+
+def _is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
 
 
 def _literal_int(node: ast.expr) -> int | None:
