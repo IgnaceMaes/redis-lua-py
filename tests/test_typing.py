@@ -13,7 +13,7 @@ import sys
 import redis
 import redis.asyncio
 
-from redis_lua_py import BoundScript, CompiledScript, Key, script
+from redis_lua_py import BoundScript, CompiledScript, Key, Library, LibraryFunction, script
 from redis_lua_py import redis as r
 
 if sys.version_info >= (3, 11):
@@ -57,6 +57,24 @@ async def check_an_async_call(client: redis.asyncio.Redis) -> None:
 async def check_an_async_bind(client: redis.asyncio.Redis) -> None:
     bound = counter.bind(client)
     assert_type(await bound(k="x"), int)
+
+
+typed_library = Library("typing_checks")
+
+
+@typed_library.function
+def counted(k: Key) -> int:
+    return r.incr(k)
+
+
+def check_a_library_function(client: redis.Redis) -> None:
+    assert_type(counted, LibraryFunction[int])
+    assert_type(counted(client, k="x"), int)
+    assert_type(counted.bind(client)(k="x"), int)
+
+
+async def check_an_async_library_function(client: redis.asyncio.Redis) -> None:
+    assert_type(await counted(client, k="x"), int)
 
 
 def test_the_annotation_does_not_change_what_runs() -> None:

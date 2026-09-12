@@ -1,11 +1,12 @@
 # API reference
 
 Everything in `redis_lua_py.__all__`. The package is small on purpose: one
-decorator, one annotation, two namespaces, and the errors.
+decorator, a library for Redis Functions, one annotation, two namespaces, and
+the errors.
 
 ```python
-from redis_lua_py import Key, call, cjson, redis, script
-from redis_lua_py import BoundScript, CompiledScript
+from redis_lua_py import Key, Library, call, cjson, redis, script
+from redis_lua_py import BoundScript, CompiledScript, LibraryFunction
 ```
 
 ## `script`
@@ -17,6 +18,7 @@ def script(
     *,
     name: str | None = None,
     header: bool = True,
+    flags: Iterable[str] = (),
 ) -> CompiledScript[R] | Callable[[Callable[..., R]], CompiledScript[R]]
 ```
 
@@ -35,6 +37,7 @@ def touch(key: Key) -> int: ...
 | --- | --- |
 | `name` | overrides the name in the generated header and in errors |
 | `header` | `False` drops the provenance comment entirely, for anyone who wants the script body and nothing else |
+| `flags` | script flags for Redis 7, such as `no-writes`, written on a `#!lua` first line; see [Redis Functions](../guide/redis-functions.md#flags) |
 
 Parameters annotated [`Key`](#key) become `KEYS`, in declaration order; every
 other parameter becomes `ARGV`. See
@@ -137,7 +140,81 @@ bound(*positional, **keyword) -> T
 ```
 
 Exposes `name`, `lua`, `params`, `keys`, `args` and `doc` from the script it
-wraps, and leaves that script usable against any other client.
+wraps, and leaves that script usable against any other client. A
+[`LibraryFunction`](#libraryfunction) binds the same way.
+
+## `Library`
+
+```python
+class Library(name: str)
+```
+
+A Redis Functions library. `name` is the library name Redis registers, and
+takes letters, digits and underscores. See
+[Redis Functions](../guide/redis-functions.md).
+
+### `function`
+
+```python
+def function(
+    self,
+    func: Callable[..., R] | None = None,
+    /,
+    *,
+    name: str | None = None,
+    flags: Iterable[str] = (),
+) -> LibraryFunction[R] | Callable[[Callable[..., R]], LibraryFunction[R]]
+```
+
+Compile a function into the library, under the same rules as
+[`script`](#script). Usable bare or called.
+
+| Parameter | Meaning |
+| --- | --- |
+| `name` | the function name Redis registers, instead of the Python name |
+| `flags` | function flags, such as `no-writes`; a `no-writes` function is called with `FCALL_RO` |
+
+### `load`
+
+```python
+def load(self, client) -> Any
+```
+
+Load the library with `FUNCTION LOAD REPLACE`. Calling a function loads the
+library when the server lacks it, so this is only needed before queueing calls
+in a pipeline, or to load at deploy time.
+
+| Attribute | Type | What it is |
+| --- | --- | --- |
+| `name` | `str` | the library name |
+| `lua` | `str` | the library source, exactly as `FUNCTION LOAD` receives it |
+| `functions` | `tuple[LibraryFunction, ...]` | the functions, in the order they were added |
+
+## `LibraryFunction`
+
+```python
+class LibraryFunction(Generic[R])
+```
+
+What `Library.function` returns. Calling it sends `FCALL`, or `FCALL_RO` for a
+`no-writes` function, and loads the library first if the server does not have
+it.
+
+```python
+function(client, /, *positional, **keyword) -> R              # sync client
+function(client, /, *positional, **keyword) -> Awaitable[R]   # async client
+```
+
+It has the same `name`, `params`, `keys`, `args`, `variadic_key`,
+`variadic_arg`, `doc` and `source` as a [`CompiledScript`](#compiledscript),
+and a `bind` that works the same way, plus:
+
+| Attribute | Type | What it is |
+| --- | --- | --- |
+| `library` | `Library` | the library the function belongs to |
+| `lua` | `str` | the source of that whole library |
+| `flags` | `tuple[str, ...]` | the function's flags |
+| `read_only` | `bool` | whether it is flagged `no-writes`, and so called with `FCALL_RO` |
 
 ## `codegen`
 

@@ -69,6 +69,77 @@ def _is_cluster_pipeline(client: object) -> bool:
     return cls.__name__ == "ClusterPipeline" and cls.__module__.startswith("redis.")
 
 
+def resolve_arguments(
+    owner: str,
+    params: tuple[str, ...],
+    keys: tuple[str, ...],
+    args: tuple[str, ...],
+    variadic_key: str | None,
+    variadic_arg: str | None,
+    positional: tuple[object, ...],
+    keyword: dict[str, object],
+) -> tuple[list[Any], list[Any]]:
+    """Resolve call arguments into the KEYS and ARGV lists, for a script or a function."""
+    if len(positional) > len(params):
+        raise ScriptArgumentError(
+            f"{owner}() takes {len(params)} argument(s), got {len(positional)}"
+        )
+
+    values: dict[str, object] = dict(zip(params, positional, strict=False))
+    for key, value in keyword.items():
+        if key not in params:
+            suggestion = difflib.get_close_matches(key, params, n=1)
+            hint = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
+            raise ScriptArgumentError(
+                f"{owner}() has no parameter {key!r}{hint} (parameters: {', '.join(params)})"
+            )
+        if key in values:
+            raise ScriptArgumentError(f"{owner}() got two values for {key!r}")
+        values[key] = value
+
+    missing = [p for p in params if p not in values]
+    if missing:
+        raise ScriptArgumentError(f"{owner}() is missing argument(s): {', '.join(missing)}")
+
+    resolved_keys: list[Any] = []
+    for k in keys:
+        if k == variadic_key:
+            resolved_keys.extend(_items(k, values[k]))
+        else:
+            resolved_keys.append(values[k])
+    argv: list[Any] = []
+    for a in args:
+        if a == variadic_arg:
+            argv.extend(encode(a, item) for item in _items(a, values[a]))
+        else:
+            argv.append(encode(a, values[a]))
+    return resolved_keys, argv
+
+
+class ScriptLike(Protocol):
+    """What a bound script needs from what it binds: a script or a library function."""
+
+    @property
+    def name(self) -> str: ...  # pragma: no cover - a typing shape
+
+    @property
+    def lua(self) -> str: ...  # pragma: no cover
+
+    @property
+    def params(self) -> tuple[str, ...]: ...  # pragma: no cover
+
+    @property
+    def keys(self) -> tuple[str, ...]: ...  # pragma: no cover
+
+    @property
+    def args(self) -> tuple[str, ...]: ...  # pragma: no cover
+
+    @property
+    def doc(self) -> str | None: ...  # pragma: no cover
+
+    def __call__(self, client: Any, /, *positional: object, **keyword: object) -> Any: ...
+
+
 @dataclass(frozen=True)
 class CompiledScript(Generic[R]):
     """A Python function compiled to Lua, callable against a Redis client.
@@ -132,41 +203,16 @@ class CompiledScript(Generic[R]):
 
     def resolve(self, *positional: object, **keyword: object) -> tuple[list[Any], list[Any]]:
         """Resolve call arguments into the KEYS and ARGV lists."""
-        if len(positional) > len(self.params):
-            raise ScriptArgumentError(
-                f"{self.name}() takes {len(self.params)} argument(s), got {len(positional)}"
-            )
-
-        values: dict[str, object] = dict(zip(self.params, positional, strict=False))
-        for key, value in keyword.items():
-            if key not in self.params:
-                suggestion = difflib.get_close_matches(key, self.params, n=1)
-                hint = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
-                raise ScriptArgumentError(
-                    f"{self.name}() has no parameter {key!r}{hint} "
-                    f"(parameters: {', '.join(self.params)})"
-                )
-            if key in values:
-                raise ScriptArgumentError(f"{self.name}() got two values for {key!r}")
-            values[key] = value
-
-        missing = [p for p in self.params if p not in values]
-        if missing:
-            raise ScriptArgumentError(f"{self.name}() is missing argument(s): {', '.join(missing)}")
-
-        keys: list[Any] = []
-        for k in self.keys:
-            if k == self.variadic_key:
-                keys.extend(_items(k, values[k]))
-            else:
-                keys.append(values[k])
-        argv: list[Any] = []
-        for a in self.args:
-            if a == self.variadic_arg:
-                argv.extend(encode(a, item) for item in _items(a, values[a]))
-            else:
-                argv.append(encode(a, values[a]))
-        return keys, argv
+        return resolve_arguments(
+            self.name,
+            self.params,
+            self.keys,
+            self.args,
+            self.variadic_key,
+            self.variadic_arg,
+            positional,
+            keyword,
+        )
 
     def _for(self, client: Any) -> Any:
         """Get the redis-py Script bound to this client, registering it once.
@@ -197,7 +243,7 @@ class BoundScript(Generic[T]):
     for a sync client, an awaitable of it for an async one.
     """
 
-    script: CompiledScript[Any]
+    script: ScriptLike
     client: Any
 
     def __call__(self, *positional: object, **keyword: object) -> T:

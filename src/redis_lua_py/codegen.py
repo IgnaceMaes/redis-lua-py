@@ -149,9 +149,10 @@ def _leftovers(directory: Path, expected: dict[Path, str]) -> list[Path]:
 
 
 def _is_generated(path: Path) -> bool:
-    # The marker is on the second line of the header; the first is the name.
+    # The marker is on the second line of the header, after the name, or on the
+    # third when a script's flags take the first line for `#!lua flags=`.
     with path.open(encoding="utf-8", errors="replace") as handle:
-        return any(line.startswith(_MARKER) for line in islice(handle, 2))
+        return any(line.startswith(_MARKER) for line in islice(handle, 3))
 
 
 def _diff(path: Path, before: str | None, after: str | None) -> str:
