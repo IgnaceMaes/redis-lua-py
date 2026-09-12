@@ -17,7 +17,8 @@ Lua 5.1 has no 'continue' statement
 RedisLuaError
 ├── CompileError
 │   └── UnsupportedSyntax
-└── ScriptArgumentError
+├── ScriptArgumentError
+└── StaleLuaError
 
 RedisLuaWarning  (a UserWarning)
 └── NilTruncationWarning
@@ -52,6 +53,16 @@ is the only error in the list raised at call time rather than at import.
 ```
 rate_limit() has no parameter 'tll'; did you mean 'ttl'? (parameters: key, limit, ttl)
 ```
+
+## `StaleLuaError`
+
+Lua generated ahead of time no longer matches the scripts it came from. Raised
+by [`codegen.check`](api.md#codegencheck), with a diff and the command that
+regenerates the output. See
+[Shipping without the dependency](../guide/build-time.md#keep-it-current).
+
+It is also an `AssertionError`, so a test that calls `check` reports a failed
+assertion rather than an error in the test itself.
 
 ## `RedisLuaWarning`
 

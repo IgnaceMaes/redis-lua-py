@@ -41,6 +41,7 @@ from .errors import (
     RedisLuaError,
     RedisLuaWarning,
     ScriptArgumentError,
+    StaleLuaError,
     UnsupportedSyntax,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "RedisLuaError",
     "RedisLuaWarning",
     "ScriptArgumentError",
+    "StaleLuaError",
     "UnsupportedSyntax",
     "call",
     "cjson",

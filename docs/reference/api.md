@@ -139,8 +139,69 @@ bound(*positional, **keyword) -> T
 Exposes `name`, `lua`, `params`, `keys`, `args` and `doc` from the script it
 wraps, and leaves that script usable against any other client.
 
+## `codegen`
+
+```python
+from redis_lua_py import codegen
+```
+
+Compile scripts to Lua ahead of time, for code that should not depend on this
+package at runtime. See
+[Shipping without the dependency](../guide/build-time.md). Every function takes
+the module as a module object or a dotted name, and `out` as a path:
+
+- ending in `.py`, for one module holding every script as a string constant
+  and importing nothing
+- anything else, for a directory with one `.lua` file per script
+
+### `codegen.generate`
+
+```python
+def generate(module: ModuleType | str, out: str | Path) -> list[Path]
+```
+
+Write the scripts under `out`, and return the paths that changed. A file that
+already holds the right content is left alone. In a directory, a `.lua` file
+generated earlier for a script that no longer exists is removed.
+
+### `codegen.check`
+
+```python
+def check(module: ModuleType | str, out: str | Path) -> None
+```
+
+Raise [`StaleLuaError`](errors.md#staleluaerror), with a diff, unless `out`
+holds exactly what `generate` would write. Writes nothing.
+
+### `codegen.render`
+
+```python
+def render(module: ModuleType | str, out: str | Path) -> dict[Path, str]
+```
+
+The files `generate` would write, and what each would hold.
+
+### `codegen.collect`
+
+```python
+def collect(module: ModuleType | str) -> dict[str, CompiledScript[Any]]
+```
+
+Every script a module holds, by the name it is bound to, in definition order.
+A script bound to two names is collected once, under the first.
+
+### The command line
+
+```bash
+python -m redis_lua_py generate MODULE --out PATH [--check]
+```
+
+`generate` or, with `--check`, `check`, exiting 1 on an out-of-date output, a
+module that cannot be imported, or a script that does not compile. Installing
+the package also provides the same command as `redis-lua-py`.
+
 ## Errors and warnings
 
-`CompileError`, `UnsupportedSyntax`, `ScriptArgumentError`, `RedisLuaError`,
-`RedisLuaWarning` and `NilTruncationWarning` have
+`CompileError`, `UnsupportedSyntax`, `ScriptArgumentError`, `StaleLuaError`,
+`RedisLuaError`, `RedisLuaWarning` and `NilTruncationWarning` have
 [their own page](errors.md).

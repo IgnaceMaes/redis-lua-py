@@ -28,6 +28,9 @@ Repository = "https://github.com/ignacemaes/redis-lua-py"
 Issues = "https://github.com/ignacemaes/redis-lua-py/issues"
 Changelog = "https://github.com/ignacemaes/redis-lua-py/blob/main/CHANGELOG.md"
 
+[project.scripts]
+redis-lua-py = "redis_lua_py.__main__:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
