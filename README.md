@@ -17,6 +17,13 @@
   Compiled at import, checked by <code>mypy</code>, sent with <code>EVALSHA</code>. Sync and async redis-py.
 </p>
 
+<p align="center">
+  <b><a href="https://ignacemaes.com/redis-lua-py/">Documentation</a></b> ·
+  <a href="https://ignacemaes.com/redis-lua-py/quickstart/">Quickstart</a> ·
+  <a href="https://ignacemaes.com/redis-lua-py/reference/api/">API reference</a> ·
+  <a href="./CHANGELOG.md">Changelog</a>
+</p>
+
 ```python
 from redis_lua_py import Key, redis, script
 
@@ -56,6 +63,8 @@ for the script namespace, so the two never collide.
 uv add redis-lua-py
 ```
 
+Python 3.11+, and redis-py 5.0+ as the only dependency.
+
 ## What it compiles to
 
 Nothing is hidden. Every script exposes the Lua it produced:
@@ -86,409 +95,39 @@ point of this library is to generate Lua you would have been willing to write.
 The header is part of the body, and the body is what `EVALSHA` hashes, so the
 path in it is relative to your project root rather than absolute — the same
 script has the same SHA on a laptop, in CI and in a container, and the server's
-script cache is cold once per script rather than once per environment. Pass
-`@script(header=False)` to drop the comment entirely.
-
-## Keys and arguments
-
-A parameter annotated `Key` becomes `KEYS`, in declaration order. Everything
-else becomes `ARGV`.
-
-This distinction is not cosmetic. Redis Cluster routes a script by its declared
-keys, and a key smuggled in as an argument is invisible to the router — the
-script will execute on the wrong node. Annotate every key.
-
-`ARGV` always arrives in Lua as a string. Annotating a parameter `int` or
-`float` wraps it in `tonumber` for you, so `limit` above is a number by the
-time your comparison runs.
-
-Annotate `float` for arithmetic, not for a value you mean to write back
-unchanged. `tonumber` makes it a Lua number, and Lua renders a number back to
-text with `%.14g`, so a value with more significant digits than that does not
-come back as it went in. Annotate `str` and call `str()` at the call site when
-the value is only being carried.
-
-`bool` encodes to `"1"` or `"0"`. Paired with an `int` annotation that deletes
-the `1 if flag else 0` from the call site: pass `True`, and the body gets `1`.
-
-`bytes` is passed through untouched — see [Binary values](#binary-values).
-
-Scripts accept positional or keyword arguments; keyword is clearer at the call
-site and is what the errors suggest.
-
-## Async
-
-The same script object works with either client. Pass a sync client and you get
-a value; pass an async one and you get an awaitable.
-
-```python
-from redis.asyncio import Redis
-
-client = Redis()
-remaining = await rate_limit(client, key="user:42", limit=10, ttl=60)
-```
-
-Script caching, `EVALSHA`, and the `NOSCRIPT` reload are handled by redis-py's
-own script machinery, which this defers to rather than reimplementing.
-
-## Binding a client
-
-Passing the client to every call gets repetitive. `bind` attaches one:
-
-```python
-limiter = rate_limit.bind(client)
-
-limiter(key="user:42", limit=10, ttl=60)
-limiter(key="user:43", limit=10, ttl=60)
-```
-
-A bound script exposes the same `.lua`, `.keys` and `.args` as the original,
-binds async clients just as well, and leaves the unbound form working — the
-script itself is unchanged and still usable against any other client.
-
-## Calling Redis commands
-
-`redis.<command>(...)` becomes `redis.call('<COMMAND>', ...)`. Underscores
-split into subcommand tokens, so `redis.script_load(x)` compiles to
-`redis.call('SCRIPT', 'LOAD', x)`.
-
-`redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`,
-`redis.log` and `cjson.encode` / `cjson.decode` pass through under their own
-names.
-
-### Names are checked, not just uppercased
-
-Uppercasing turns *any* attribute into a plausible command, which makes a name
-Redis does not have the one mistake with nothing standing in its way: it
-compiles, it survives review, and it raises the first time its branch runs —
-inside a script whose whole purpose was to be atomic.
-
-So command names are checked at compile time against Redis' own command table,
-and a miss is refused where you can see it:
-
-```
-Redis has no EXPIRES command
-  File "/srv/app/limits.py", line 14
-    redis.expires(key, 60)
-    ^
-  hint: Did you mean redis.expire()?
-```
-
-The handful of redis-py method names that do not match the wire name are
-translated rather than refused, because each names exactly one command and
-nothing else: `redis.delete(k)` compiles to `redis.call('DEL', k)`. Container
-commands are checked down to the subcommand, and a hyphenated one is reached
-through its underscores — `redis.client_no_evict("on")` compiles to
-`redis.call('CLIENT', 'NO-EVICT', 'on')`.
-
-`redis.call(...)` is deliberately never checked. It is the escape hatch for
-module commands, which are spelled with a dot anyway, and for anything a newer
-server has that the table does not:
-
-```python
-redis.call("JSON.SET", doc, "$.status", '"done"')
-```
-
-The table is generated from the command definitions in the Redis source — the
-same files the server is built from — and currently tracks Redis 8.10.
-Regenerate it with `uv run python scripts/generate_commands.py`.
-
-### When the client is imported too
-
-Import the client *class* and nothing collides, because the name `redis` is
-never taken:
-
-```python
-from redis import Redis
-from redis_lua_py import Key, redis, script
-```
-
-If you want the client module itself, the namespace is resolved by value rather
-than by spelling, so import it under any name you like:
-
-```python
-import redis  # the client
-from redis_lua_py import Key, script
-from redis_lua_py import redis as r  # the script namespace
-
-
-@script
-def claim(queue: Key, now: int) -> list[bytes]:
-    return r.zrangebyscore(queue, 0, now)
-
-
-client = redis.Redis()
-```
-
-`call` is also exported as an alias of `redis`, if you would rather rename
-nothing at all.
-
-Getting this wrong is caught rather than compiled. If the name in scope turns
-out to be redis-py, the script is refused instead of being quietly aimed at the
-client library:
-
-```
-'redis' is bound to redis-py here, not to the script namespace
-  File "/srv/app/jobs.py", line 9
-    return redis.zrangebyscore(queue, 0, now)
-           ^
-  hint: Import the namespace under another name (from redis_lua_py import
-  redis as r), or the client under another name (import redis as redis_client).
-```
-
-## Constants from the module
-
-A script has no closure: the body runs on the server, where nothing from your
-Python process exists. A module-level constant is the exception worth making,
-because it is already a literal and can simply be folded in.
-
-```python
-SESSION_TTL_SECONDS = 30 * 60
-
-
-@script
-def touch_session(session: Key) -> int:
-    hits = redis.incr(session)
-    redis.expire(session, SESSION_TTL_SECONDS)  # -> redis.call('EXPIRE', session, 1800)
-    return hits
-```
-
-`int`, `float`, `str`, `bytes` and `bool` are folded, including through a
-dotted name — an `IntEnum` member, or an attribute of a settings object.
-Anything else is refused with the same caret as everything else, because there
-is no literal to fold:
-
-```
-'SESSION_TTL' is a module-level timedelta, which has no Lua literal
-  File "/srv/app/sessions.py", line 18
-    redis.expire(session, SESSION_TTL)
-                          ^
-  hint: Only an int, float, str, bytes or bool constant is folded into the
-  script. Pass anything else as an argument, or name the literal it reduces to.
-```
-
-The value is read once, when the module is imported and the script compiles.
-A name rebound afterwards does not change the script — which is what "constant"
-means, but worth saying out loud.
-
-## Binary values
-
-Nothing here decodes. `KEYS`, `ARGV` and every Lua string are byte strings, so
-a `bytes` argument arrives in the script as exactly those bytes and comes back
-as exactly those bytes.
-
-```python
-import zlib
-
-
-@script
-def cache_compressed(key: Key, blob: bytes, ttl: int) -> int:
-    redis.set(key, blob)
-    redis.expire(key, ttl)
-    return len(blob)
-
-
-cache_compressed(client, key="report:42", blob=zlib.compress(report), ttl=300)
-```
-
-A `bytes` annotation is a passthrough: no `tonumber`, no decoding, no round
-trip through text. `memoryview` is accepted the same way. A `bytes` literal in
-a body is emitted as numeric escapes — `b"\x00\xff"` becomes `'\000\255'` —
-so it survives the journey to the server, where the script itself travels as
-text.
-
-This is a guarantee rather than an observation:
-[tests/test_binary.py](tests/test_binary.py) round-trips non-UTF-8 bytes
-through `ARGV`, through a stored value, and back out of a returned `GETRANGE`,
-against both fakeredis and a real server.
-
-## What the caller gets
-
-The return annotation describes the **caller's** side: the value that comes
-back from Redis, not the value the body hands to Lua. The compiler does not
-read it at all.
-
-It is carried through to the call, so a script is a `CompiledScript[R]` and
-`rate_limit` above returns an `int` rather than `Any`:
-
-```python
-remaining = rate_limit(client, key="user:42", limit=10, ttl=60)  # int
-```
-
-An async client gives you `Awaitable[R]`, so `await` gets you back to `R`.
-`bind` carries it too, on both.
-
-Redis renders every reply as bytes, which is what to annotate — and what to
-write in the body when a branch needs a placeholder:
-
-```python
-@script
-def preview(doc: Key) -> list[int | bytes]:
-    size = redis.strlen(doc)
-    if size == 0:
-        return [0, b""]
-    return [1, redis.getrange(doc, 0, 1023)]
-```
-
-`b""` and `""` compile to the same Lua string; only one of them also describes
-what the caller receives, which keeps the body and the signature agreeing
-about the same thing.
-
-Inside a body, every value that came from Redis is `Any` — nothing about
-`redis.get(k)` is knowable ahead of time. Under `mypy --strict` that makes
-`warn_return_any` fire on a body that returns a command result directly, on
-the one function whose body Python never runs. Turn it off for the module your
-scripts live in:
-
-```toml
-[[tool.mypy.overrides]]
-module = "myapp.scripts"
-warn_return_any = false
-```
-
-## The supported subset
-
-Supported: assignment, augmented assignment, `if`/`elif`/`else`, `for ... in`
-over a table or `range()`, `while`, `break`, `return`, comparisons, arithmetic,
-f-strings, list and dict literals, `len()`, `.append()`, `int()`, `float()`,
-`str()`, `min()`, `max()`, `abs()`, module-level constants, and calls into
-`redis` and `cjson`.
-
-Everything else raises `UnsupportedSyntax` when the module is imported, with a
-caret under the line at fault:
-
-```
-'and'/'or' are only supported in an if or while condition
-  File "/srv/app/limits.py", line 12
-    flag = a and b
-           ^
-  hint: In Python these return an operand, which does not survive the
-  difference in truthiness. Use an if statement instead.
-```
-
-Failing at import, loudly, is deliberate. A body that looks like Python but is
-never run by Python is exactly where a quiet mistranslation would cost the
-most.
-
-## Where Lua differs from Python
-
-These are the gaps that matter. Most are closed for you; the rest are refused.
-
-**Truthiness is closed.** Lua counts `0` and `''` as true. Any condition that
-is not already a boolean is routed through a generated `__truthy` helper, so
-`if count:` means what it means in Python.
-
-**Missing values are closed.** A Redis command with nothing to return hands Lua
-`false`, not `nil`. This is the classic trap: a hand-written `== nil` never
-matches, so the branch silently never runs. `x is None` compiles to a helper
-accepting both, which also takes `x` as an argument — so
-`if redis.hget(k, f) is None:` does not run the command twice.
-
-**Indexing is closed.** Lua tables are 1-based. `items[0]` compiles to
-`items[1]`. Write Python indices and let the compiler shift them. Negative
-indices are refused, because Lua has no equivalent.
-
-**Assignment scope is closed.** Python scopes a name to the whole function;
-Lua's `local` scopes it to the enclosing block. A name assigned inside an `if`
-and read after it is hoisted to the top of the script, so it does not silently
-read back `nil`.
-
-**`+` is arithmetic, not concatenation.** Use an f-string, which compiles to
-Lua's `..`.
-
-**`and` / `or` work only in conditions.** In Python they return an operand, not
-a boolean, and that does not survive the truthiness difference. Use an `if`.
-
-**There is no `continue`.** Lua 5.1 does not have one. Invert the condition and
-nest the rest of the body.
-
-**A loop variable does not outlive its loop,** unlike in Python.
-
-**A nil inside a returned table truncates the reply.** Redis converts a
-returned array by walking it from the first element and stopping at the first
-`nil`, so the caller gets a shorter list rather than a null in the middle of
-one.
-
-Which values are actually nil is the part worth being exact about. A command
-with nothing to return hands Lua `false`, and `false` converts to a null
-*element* without ending the array — `return [1, redis.get(missing), 3]` really
-does reach the caller as `[1, None, 3]`. What truncates is a genuine nil, and
-in practice that means a name that was not assigned on this path. The compiler
-warns where it can see one:
-
-```
-'first' is not assigned on every path to this return, and a nil in a returned
-table truncates the reply there
-  File "/srv/app/queue.py", line 31
-    return [1, first, count]
-               ^
-  hint: Give it a value before the branch, so that every branch returns a
-  table of the same shape.
-```
-
-and refuses a `None` written out in the table, since that one is never what
-anybody meant. Silence the warning with
-`warnings.filterwarnings("ignore", category=NilTruncationWarning)` if your
-script really does mean to stop there.
-
-**Return values follow Redis' own conversion rules:** `True` becomes `1`,
-`False` and `None` become nil, floats are truncated to integers. Return a
-string, or `cjson.encode(...)`, when you need one preserved exactly.
-
-## A larger example
-
-```python
-@script
-def claim_jobs(queue: Key, processing: Key, now: int, limit: int) -> list[bytes]:
-    """Atomically move due jobs from a sorted set into a processing hash."""
-    ids = redis.zrangebyscore(queue, 0, now, "LIMIT", 0, limit)
-    claimed = []
-    for job_id in ids:
-        if redis.zrem(queue, job_id) == 1:
-            redis.hset(processing, job_id, now)
-            claimed.append(job_id)
-    return claimed
-```
-
-```lua
-local queue = KEYS[1]
-local processing = KEYS[2]
-local now = tonumber(ARGV[1])
-local limit = tonumber(ARGV[2])
-local ids = redis.call('ZRANGEBYSCORE', queue, 0, now, 'LIMIT', 0, limit)
-local claimed = {}
-for __i1 = 1, #ids do
-  local job_id = ids[__i1]
-  if redis.call('ZREM', queue, job_id) == 1 then
-    redis.call('HSET', processing, job_id, now)
-    claimed[#claimed + 1] = job_id
-  end
-end
-return claimed
-```
+script cache is cold once per script rather than once per environment.
+
+## What else it does
+
+- **[Keys and arguments](https://ignacemaes.com/redis-lua-py/guide/keys-and-arguments/)** —
+  a parameter annotated `Key` becomes `KEYS`, which is what Redis Cluster
+  routes on; an `int` or `float` is wrapped in `tonumber` for you.
+- **[Command names are checked](https://ignacemaes.com/redis-lua-py/guide/calling-redis-commands/)**
+  at compile time against Redis' own command table, so `redis.expires(...)` is
+  refused where you can see it rather than raised inside a script whose whole
+  purpose was to be atomic.
+- **[Constants are folded](https://ignacemaes.com/redis-lua-py/guide/constants/)** —
+  a module-level `int`, `float`, `str`, `bytes` or `bool` is read once, at
+  import, and written into the script as a literal.
+- **[Binary values survive](https://ignacemaes.com/redis-lua-py/guide/binary-values/)** —
+  nothing here decodes, and `bytes` is a passthrough in both directions.
+- **[The caller's side is typed](https://ignacemaes.com/redis-lua-py/guide/return-values/)** —
+  a script is a `CompiledScript[R]`, and an async client gives you
+  `Awaitable[R]`.
+- **[Sync and async](https://ignacemaes.com/redis-lua-py/guide/async/)** from
+  the same script object, and
+  **[`bind`](https://ignacemaes.com/redis-lua-py/guide/binding-a-client/)** when
+  passing the client every time gets repetitive.
+- **[The gaps between Lua and Python](https://ignacemaes.com/redis-lua-py/reference/lua-vs-python/)**
+  are closed or refused — truthiness, 1-based indexing, `false` versus `nil`,
+  block scope, and the nil that truncates a returned table.
+- **[Anything outside the supported subset](https://ignacemaes.com/redis-lua-py/reference/supported-subset/)**
+  raises at import, with a caret under the line at fault.
+
+Full documentation: **[ignacemaes.com/redis-lua-py](https://ignacemaes.com/redis-lua-py/)**.
 
 ## Testing your scripts
 
-Replacing working Lua in a production path needs evidence. Two things supply
-most of it, and both are short.
-
-**Snapshot the Lua.** `.lua` is the whole script, so a golden test is a string
-comparison — and the diff against the Lua you are replacing is the review.
-
-```python
-from pathlib import Path
-
-GOLDEN = Path(__file__).parent / "golden" / "rate_limit.lua"
-
-
-def test_generated_lua_is_unchanged():
-    assert rate_limit.lua == GOLDEN.read_text()
-```
-
-The header path is repo-relative, so this is stable across machines and CI.
-Use `@script(header=False)` if you would rather compare the body alone.
-
-**Run the behaviour, without a server.**
 [fakeredis](https://github.com/cunla/fakeredis-py) embeds a real Lua
 interpreter, so your script executes for real against an in-process server:
 
@@ -505,9 +144,9 @@ def test_rate_limit_refuses_past_the_limit():
 ```
 
 Install it with `uv add --dev "fakeredis[lua]"`; the `lua` extra is what brings
-the interpreter. This library's own suite runs that way and against a real
-Redis in CI, and the two agree — including on reply conversion, which is the
-part you would most want a real server for.
+the interpreter. `.lua` is the whole script, so a golden snapshot is a string
+comparison — see
+[Testing your scripts](https://ignacemaes.com/redis-lua-py/guide/testing/).
 
 ## Development
 
@@ -532,6 +171,9 @@ when a Redis release adds commands:
 ```bash
 uv run python scripts/generate_commands.py 8.10.1
 ```
+
+The docs site is built with [Zensical](https://zensical.org); `uv run zensical
+serve` previews it with live reload.
 
 Pull requests are squash-merged and their titles must follow
 [Conventional Commits](https://www.conventionalcommits.org/): the title becomes
