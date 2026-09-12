@@ -76,6 +76,15 @@ class ScriptArgumentError(RedisLuaError):
     """A script was called with the wrong keys or arguments."""
 
 
+class StaleLuaError(RedisLuaError, AssertionError):
+    """Lua generated ahead of time no longer matches the scripts it came from.
+
+    Also an ``AssertionError``, so that a test calling
+    :func:`redis_lua_py.codegen.check` reports a failure, diff included,
+    rather than an error in the test itself.
+    """
+
+
 class RedisLuaWarning(UserWarning):
     """Base class for every warning this package raises.
 

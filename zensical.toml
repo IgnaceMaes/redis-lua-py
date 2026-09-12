@@ -31,6 +31,7 @@ nav = [
     { "Async" = "guide/async.md" },
     { "Binding a client" = "guide/binding-a-client.md" },
     { "Testing your scripts" = "guide/testing.md" },
+    { "Shipping without the dependency" = "guide/build-time.md" },
   ] },
   { "Reference" = [
     { "The supported subset" = "reference/supported-subset.md" },
