@@ -7,6 +7,23 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.7.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.6.0...v0.7.0) (2026-09-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* a + b where neither side is known to be a number or a string now joins two strings instead of adding them as numbers, as Python does, so wrap a side in int to add. Integer keys of a dict the compiler knows to be one are no longer shifted by one, and a lambda or helper function that reads a loop variable is refused.
+
+### Added
+
+* compile lambdas, chained comparisons and slice steps, and tell dicts from lists ([6024009](https://github.com/IgnaceMaes/redis-lua-py/commit/6024009eaefeb20ccb743225c609799aa332f7c2))
+* support coredis clients ([#22](https://github.com/IgnaceMaes/redis-lua-py/issues/22)) ([3d07a89](https://github.com/IgnaceMaes/redis-lua-py/commit/3d07a89f5b4c55eddca3a1f3bae5f45b41fd4156))
+
+
+### Changed
+
+* split the compiler into a package of modules ([#20](https://github.com/IgnaceMaes/redis-lua-py/issues/20)) ([5f67766](https://github.com/IgnaceMaes/redis-lua-py/commit/5f67766f015c038086894f3b61fa76d6f9deef12))
+
 ## [0.6.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.5.1...v0.6.0) (2026-09-12)
 
 
