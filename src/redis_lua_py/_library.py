@@ -43,6 +43,23 @@ def _function_missing(error: BaseException) -> bool:
     return "Function not found" in str(error)
 
 
+def _modern_function_load(client: object) -> Any:
+    """The client's function_load, if it takes the library code first.
+
+    Early redis-py releases, 4.2.0 among them, still have the Redis 7
+    release-candidate signature, function_load(engine, library, code), which
+    no released Redis accepts.
+    """
+    function_load = getattr(client, "function_load", None)
+    if function_load is None:
+        return None
+    try:
+        parameters = list(inspect.signature(function_load).parameters)
+    except (TypeError, ValueError):  # a callable without an inspectable signature
+        return None
+    return function_load if parameters[:1] == ["code"] else None
+
+
 class Library:
     """A Redis Functions library, built from Python functions.
 
@@ -130,8 +147,10 @@ class Library:
         is only needed ahead of a pipeline, or to load at deploy time. Returns
         what the client returns: an awaitable for an async client.
         """
-        function_load = getattr(client, "function_load", None)
+        function_load = _modern_function_load(client)
         if function_load is not None:
+            # Preferred where it exists, since redis-py routes it to every
+            # primary of a cluster.
             return function_load(self.lua, replace=True)
         return client.execute_command("FUNCTION", "LOAD", "REPLACE", self.lua)
 
