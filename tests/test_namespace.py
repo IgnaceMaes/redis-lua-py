@@ -16,7 +16,8 @@ import module_with_client
 import module_without_import
 from redis_lua_py import CompiledScript, Key, UnsupportedSyntax, call, cjson, script
 from redis_lua_py import redis as r
-from redis_lua_py._compile import _is_redis_py, compile_function
+from redis_lua_py._compile import compile_function
+from redis_lua_py._compile.base import is_redis_py
 
 Body = Callable[[CompiledScript], str]
 
@@ -64,13 +65,13 @@ class TestClientCollision:
         assert "from redis_lua_py import redis as r" in info.value.hint
 
     def test_detection_covers_the_module_and_its_clients(self) -> None:
-        assert _is_redis_py(redis_py)
-        assert _is_redis_py(redis_py.Redis())
-        assert _is_redis_py(redis_py.asyncio.Redis())
+        assert is_redis_py(redis_py)
+        assert is_redis_py(redis_py.Redis())
+        assert is_redis_py(redis_py.asyncio.Redis())
         # Our own namespace must never be mistaken for the client.
-        assert not _is_redis_py(r)
-        assert not _is_redis_py(call)
-        assert not _is_redis_py(42)
+        assert not is_redis_py(r)
+        assert not is_redis_py(call)
+        assert not is_redis_py(42)
 
 
 class TestOtherReceivers:

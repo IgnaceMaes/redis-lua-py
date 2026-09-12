@@ -153,9 +153,10 @@ def test_the_table_matches_the_commands_redis_py_exposes() -> None:
 
     import redis as redis_py
 
-    from redis_lua_py._compile import _REDIS_DIRECT, _Compiler
+    from redis_lua_py._compile.statements import Compiler
+    from redis_lua_py._compile.tables import REDIS_DIRECT
 
-    compiler = _Compiler(
+    compiler = Compiler(
         ast.parse("def f(): pass").body[0],  # type: ignore[arg-type]
         filename="<check>",
         first_lineno=1,
@@ -182,7 +183,7 @@ def test_the_table_matches_the_commands_redis_py_exposes() -> None:
     for name, member in inspect.getmembers(redis_py.Redis):
         if name.startswith("_") or not callable(member):
             continue
-        if name in plumbing or name in _REDIS_DIRECT or name.endswith("_iter"):
+        if name in plumbing or name in REDIS_DIRECT or name.endswith("_iter"):
             continue
         if name.startswith(("get_", "set_")):
             continue  # get_encoder, set_response_callback and friends
