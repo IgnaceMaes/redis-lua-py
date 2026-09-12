@@ -7,6 +7,18 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.4.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.3.0...v0.4.0) (2026-09-12)
+
+
+### Added
+
+* compile variable keys, splat calls, and/or values, helper functions and dict loops ([#10](https://github.com/IgnaceMaes/redis-lua-py/issues/10)) ([271f3f6](https://github.com/IgnaceMaes/redis-lua-py/commit/271f3f6be23d78246d91cde5de4fec05cee28832))
+
+
+### Fixed
+
+* stop silently mistranslating reassigned parameters, infinity, == None and set_repl ([#8](https://github.com/IgnaceMaes/redis-lua-py/issues/8)) ([930c382](https://github.com/IgnaceMaes/redis-lua-py/commit/930c38283f366fd9042c4cc20cdf7eeb34e2d8a5))
+
 ## [0.3.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.2.1...v0.3.0) (2026-09-12)
 
 
