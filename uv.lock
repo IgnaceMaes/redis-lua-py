@@ -774,7 +774,7 @@ wheels = [
 
 [[package]]
 name = "redis-lua-py"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "redis" },
@@ -797,7 +797,7 @@ requires-dist = [{ name = "redis", specifier = ">=4.2" }]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "coredis", specifier = ">=6.9.0" },
+    { name = "coredis", specifier = ">=6.9" },
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.30" },
     { name = "mypy", specifier = ">=1.15" },
     { name = "pytest", specifier = ">=8.3" },
