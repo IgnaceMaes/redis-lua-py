@@ -273,6 +273,13 @@ class LocalFunction(Stat):
 
 
 @dataclass(slots=True)
+class Block(Stat):
+    """Several statements where the compiler produces one, emitted in place."""
+
+    body: list[Stat]
+
+
+@dataclass(slots=True)
 class GenericFor(Stat):
     names: list[str]
     iterator: Expr
@@ -353,6 +360,8 @@ def emit_block(body: list[Stat], indent: int = 0) -> list[str]:
     pad = "  " * indent
     for stat in body:
         match stat:
+            case Block(body=inner):
+                lines += emit_block(inner, indent)
             case Comment(text=text):
                 lines += [f"{pad}-- {line}" for line in text.splitlines()]
             case Local(names=names, values=values):
