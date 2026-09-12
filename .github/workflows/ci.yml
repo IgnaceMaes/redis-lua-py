@@ -37,6 +37,17 @@ jobs:
   oldest:
     name: Tests (oldest supported Python and redis-py)
     runs-on: ubuntu-latest
+    # A real server as well, since what fakeredis cannot run -- Redis Functions
+    # and script flags -- is exactly what old redis-py spells differently.
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -46,8 +57,11 @@ jobs:
       # The floor in pyproject.toml is only a claim until something runs on it.
       # fakeredis declares redis>=4.3 but works on 4.2, the first release with
       # redis.asyncio, so the pin goes in after the resolver is done.
-      - run: uv pip install --no-deps "redis==4.2.0" async-timeout deprecated
+      - run: uv pip install --no-deps "redis==4.2.0" async-timeout deprecated packaging
       - run: uv run --no-sync pytest
+      - run: uv run --no-sync pytest
+        env:
+          REDIS_URL: redis://localhost:6379/0
 
   live:
     name: Tests against a real Redis

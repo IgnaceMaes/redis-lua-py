@@ -163,6 +163,28 @@ class TestLoadingOnDemand:
 
         assert bump_all(client, keys=["a", "b"]) == ("ran", "FCALL", "bump_all", 2, "a", "b")
 
+    def test_an_old_function_load_signature_is_not_used(self) -> None:
+        """redis-py 4.2.0 has function_load(engine, library, code), from a Redis 7 RC."""
+
+        class OldRedisPy(FakeClient):
+            def execute_command(self, *args: Any) -> Any:
+                if args[:3] == ("FUNCTION", "LOAD", "REPLACE"):
+                    self.calls.append(args[:3])
+                    self.loaded = args[3]
+                    return "rlp_counters"
+                return FakeClient.execute_command(self, *args)
+
+            def function_load(  # type: ignore[override]
+                self, engine: str, library: str, code: str, replace: bool = False
+            ) -> str:
+                raise AssertionError("the release-candidate signature must not be called")
+
+        client = OldRedisPy()
+
+        assert bump(client, key="k", by=2) == ("ran", "FCALL", "bump", 1, "k", "2")
+        assert client.loaded == counters.lua
+        assert ("FUNCTION", "LOAD", "REPLACE") in client.calls
+
     def test_another_error_is_not_swallowed(self) -> None:
         class Failing(FakeClient):
             def execute_command(self, *args: Any) -> Any:
