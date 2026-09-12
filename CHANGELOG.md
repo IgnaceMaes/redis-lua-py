@@ -7,6 +7,73 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.2.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.1.0...v0.2.0) (2026-09-12)
+
+Everything raised by the first adoption report of 0.1.0
+([#2](https://github.com/IgnaceMaes/redis-lua-py/pull/2),
+[0ef4ed2](https://github.com/IgnaceMaes/redis-lua-py/commit/0ef4ed23dd3cef8616ab5132d7a9089e38bb518a)).
+
+### ⚠ BREAKING CHANGES
+
+- A command name Redis does not have is now refused at import rather than
+  compiled, and a literal `None` inside a returned table is refused. Both
+  previously compiled to Lua that failed, or silently truncated, at runtime.
+- The generated header's source path is now relative to the project root,
+  which changes the SHA of every script — once.
+
+### Added
+
+- Command names are checked at compile time against a table generated from the
+  Redis source (`scripts/generate_commands.py`, tracking Redis 8.10), so a name
+  Redis does not have is refused with a caret and a suggestion rather than
+  raising the first time its branch runs.
+- The redis-py spellings that name exactly one command are translated instead
+  of refused: `redis.delete(k)` compiles to `redis.call('DEL', k)`.
+- Container commands are checked down to the subcommand, and a hyphenated one
+  is reached through its underscores: `redis.client_no_evict("on")` compiles to
+  `redis.call('CLIENT', 'NO-EVICT', 'on')`.
+- Module-level `int`, `float`, `str`, `bytes` and `bool` constants are folded
+  into a script body, including through a dotted name such as an `IntEnum`
+  member or a settings attribute. A body no longer has to repeat a number its
+  own module already names.
+- The return annotation is carried to the caller: a script is a
+  `CompiledScript[R]`, `bind()` gives a `BoundScript`, and an async client
+  yields `Awaitable[R]` rather than `Any`.
+- `@script(header=False)` drops the provenance comment, for anyone who wants
+  the script body and nothing else.
+- `NilTruncationWarning` (and `RedisLuaWarning`) are raised when a name that is
+  not assigned on every path is returned inside a table, where it would
+  truncate the reply.
+
+### Fixed
+
+- The generated header recorded an absolute source path. Since the header is
+  part of the body, and the body is what `EVALSHA` hashes, the same script had
+  a different SHA on a laptop, in CI and in a container, and put build-machine
+  paths on the Redis server. The path is now relative to the project root.
+- A `bytes` literal in a body was decoded with `surrogateescape`, which could
+  not survive the script being sent to Redis as text. Bytes literals are now
+  emitted as numeric escapes, so they arrive exactly.
+- A NUL in a Lua string literal was written `\0`, which Lua reads together
+  with a following digit as a different byte. It is now `\000`.
+- `redis.sort_ro(...)` and the other `_RO` variants split into two tokens,
+  making the `RO` a stray argument. Their underscore is part of the wire name
+  and is now kept.
+
+### Documentation
+
+- Binary values through `ARGV` are now a stated guarantee with a test that
+  round-trips non-UTF-8 bytes through `ARGV`, a stored value and a returned
+  `GETRANGE`.
+- A returned table is truncated at the first genuine `nil` -- but a command
+  with nothing to return hands Lua `false`, which becomes a null *element* and
+  does not truncate. Both are written down, in "Where Lua differs from Python".
+- "Testing your scripts": snapshot `.lua` in a golden test, and run behaviour
+  against `fakeredis[lua]` without a server.
+- Scripts belong at module level, where they compile once at import.
+- `float` round-trips through Lua's `%.14g` number formatting; `bool` encodes
+  to `"1"` / `"0"`; `bytes` is a passthrough.
+
 ## 0.1.0 (2026-09-12)
 
 First release.
