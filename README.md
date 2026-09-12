@@ -119,8 +119,9 @@ script cache is cold once per script rather than once per environment.
   **[`bind`](https://ignacemaes.com/redis-lua-py/guide/binding-a-client/)** when
   passing the client every time gets repetitive.
 - **[Build-time generation](https://ignacemaes.com/redis-lua-py/guide/build-time/)**
-  for libraries — `python -m redis_lua_py generate` writes the Lua to a module
-  of plain strings, so your users never depend on this package, and `--check`
+  for libraries — `python -m redis_lua_py generate` writes your scripts to a
+  module of typed functions that needs only the standard library, called just
+  like the `@script`, so your users never depend on this package. `--check`
   keeps it current in CI.
 - **[Redis Functions](https://ignacemaes.com/redis-lua-py/guide/redis-functions/)** —
   the same Python compiles into a function library, loaded with `FUNCTION LOAD`

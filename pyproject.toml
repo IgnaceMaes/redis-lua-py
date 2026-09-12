@@ -77,8 +77,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "N", "C4", "PT"]
 python_version = "3.10"
 strict = true
 # test_typing.py carries assert_type() claims about what a call returns, which
-# are only worth anything if mypy actually reads them.
-files = ["src", "tests/test_typing.py"]
+# are only worth anything if mypy actually reads them. generated_scripts.py is
+# codegen output, checked in so that strict mode reads what adopters ship.
+files = ["src", "tests/test_typing.py", "tests/generated_scripts.py"]
 mypy_path = "tests"
 
 # A script body returns Lua-side values, whose Python type is Any by

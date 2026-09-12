@@ -7,11 +7,12 @@ every one of your users inherits, along with the import-time compile, for Lua
 that never changes between your releases.
 
 So a library can compile ahead of time instead. You write the scripts with
-`@script`, as anywhere else, and generate plain Lua from them while you
-develop. What you ship is that Lua: no import of this package, no compile
-step, nothing added to your dependencies.
+`@script`, as anywhere else, and generate a module from them while you
+develop. What you ship is that module: plain Python that needs only the
+standard library, with a typed function per script, called exactly the way
+the `@script` would be.
 
-## Generate a module of strings
+## Generate a module
 
 Keep the scripts outside the package you ship, and redis-lua-py in your
 development dependencies:
@@ -36,22 +37,31 @@ Then, from the project root:
 python -m redis_lua_py generate redis_scripts.limits --out src/myproj/_lua.py
 ```
 
-The output imports nothing. Each script is a string constant, named after the
-function in capitals, with a comment recording the order its keys and
-arguments go in:
+Your library calls the generated functions the way it would call the scripts
+themselves:
 
 ```python
-"""Redis Lua scripts compiled by redis-lua-py from redis_scripts.limits. Do not edit.
+from redis import Redis
 
-Regenerate with:
+from ._lua import rate_limit
 
-    python -m redis_lua_py generate redis_scripts.limits --out src/myproj/_lua.py
-"""
 
-__all__ = [
-    "RATE_LIMIT",
-]
+def hit(client: Redis, key: str, limit: int, ttl: int) -> int:
+    return rate_limit(client, key=key, limit=limit, ttl=ttl)
+```
 
+Moving from `@script` to generated code, or back, is a change of import. A sync
+client gets a value and an async one an awaitable, `EVALSHA` falls back to
+`EVAL` when the server has dropped the script, and a cluster pipeline is sent
+the source: the generated module carries a copy of the code the package itself
+calls scripts with.
+
+## What the module holds
+
+For each script, its Lua as a constant named after it in capitals, and a
+function with the signature it was written with:
+
+```python
 # rate_limit -- KEYS: key; ARGV: limit, ttl
 RATE_LIMIT = """\
 -- rate_limit
@@ -68,27 +78,61 @@ if current > limit then
 end
 return limit - current
 """
+_RATE_LIMIT_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+
+
+@overload
+def rate_limit(
+    client: _AsyncClient,
+    /,
+    key: _Key,
+    limit: int,
+    ttl: int,
+) -> Awaitable[int]: ...
+@overload
+def rate_limit(client: Any, /, key: _Key, limit: int, ttl: int) -> int: ...
+def rate_limit(client: Any, /, key: _Key, limit: int, ttl: int) -> Any:
+    return _run(
+        RATE_LIMIT,
+        _RATE_LIMIT_CLIENTS,
+        client,
+        [key],
+        [_encode("limit", limit), _encode("ttl", ttl)],
+    )
 ```
 
-Your library runs it the way it would run any Lua, through redis-py:
+Because it is a real signature, Python itself refuses a missing, misspelled or
+duplicated argument, and your type checker sees every call, including what it
+returns from a sync client and from an async one. Parameter names, their
+order, keyword-only parameters and the docstring all come from the script.
 
-```python
-from redis import Redis
+The types come from the script's annotations, as far as a module that imports
+nothing of yours can repeat them:
 
-from ._lua import RATE_LIMIT
+| Parameter | Accepts |
+| --- | --- |
+| annotated `Key` | `str \| bytes \| memoryview`, as redis-py does for a key |
+| `list[Key]`, or `list[...]` of arguments | any iterable of those, as `@script` does |
+| an argument annotated with builtins only, such as `int` or `str \| bytes` | exactly that |
+| an argument annotated with anything else | `str \| bytes \| memoryview \| int \| float` |
 
+A return annotation made only of builtins, such as `list[bytes] | None`, is kept
+as written; anything else becomes `Any`. A value Redis has no representation
+for, such as `None`, raises `TypeError`, as does a string passed where a list
+belongs.
 
-class Limiter:
-    def __init__(self, client: Redis) -> None:
-        self._rate_limit = client.register_script(RATE_LIMIT)
-
-    def hit(self, key: str, limit: int, ttl: int) -> int:
-        return self._rate_limit(keys=[key], args=[limit, ttl])
-```
+Above the scripts sits that copied call path, about a hundred lines, every name
+in it private. A script or parameter named like one of them would shadow it, so
+generation refuses one and names it.
 
 Every path in the file is relative to the project root, so it comes out
 byte-for-byte the same on every machine, and regenerating it without a change
-to the scripts leaves it untouched.
+to the scripts leaves it untouched. It is laid out the way black and ruff
+format code, and passes strict mypy.
+
+If you would rather call redis-py yourself, the constants are there for that:
+`client.register_script(RATE_LIMIT)`, with `keys` and `args` in the order the
+comment above each one records.
 
 ## Or one `.lua` file per script
 
@@ -131,22 +175,22 @@ root has to be on the path. With pytest, set `pythonpath = ["."]` under
 
 ## What you give up
 
-The generated Lua is identical to what a `@script` call would send, so the
-behaviour inside Redis is the same. What stays behind is the caller's side:
+The generated Lua is identical to what a `@script` call would send, and the
+call path is the same code. What differs is at the edges:
 
-- **Argument checking.** A call through `CompiledScript` refuses a missing,
-  misspelled or duplicated argument, and a value such as `None` that has no
-  Redis representation. With a plain string, you pass `keys` and `args` in the
-  order the comment records, and nothing checks them.
-- **Booleans.** A `CompiledScript` sends `True` as `1`. redis-py refuses a
-  `bool` outright, so convert it yourself.
-- **Cluster pipelines.** A `CompiledScript` switches to `EVAL` on a redis-py
-  cluster pipeline, which refuses `EVALSHA`. A registered string does not.
+- **Errors.** A bad argument raises `TypeError`, not
+  [`ScriptArgumentError`](../reference/errors.md#scriptargumenterror), which
+  lives in this package.
+- **`bind`.** A generated function takes the client on every call. Wrap it in a
+  function of your own if that gets repetitive.
+- **Your own types.** An annotation that names a type from your module is
+  widened, as in the table above.
+- **Redis Functions.** Only `@script` functions are generated, not a
+  [`Library`](redis-functions.md).
 
-Keep writing tests that call the scripts through `@script` against
-[fakeredis](testing.md#run-the-behaviour-without-a-server) as well: those run
-the same Lua, with the checks still in place.
+Keep testing the scripts against
+[fakeredis](testing.md#run-the-behaviour-without-a-server), through the
+generated module or through `@script`: both run the same Lua.
 
 The script module itself is ordinary Python, so point your type checker and
-linter at it along with the rest of the project. Lines in the generated file
-are as long as the Lua's, so leave that one file out of any line-length rule.
+linter at it along with the rest of the project.

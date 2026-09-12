@@ -3,12 +3,18 @@
 A library that ships Redis Lua answers to two audiences. Its maintainers want
 what ``@script`` gives them: a body the linter reads, command names checked
 against Redis, a signature mypy understands. Its users want one dependency
-fewer and an import that costs nothing. Generating the Lua ahead of time serves
-both: the scripts are written in Python, compiled when a maintainer runs this,
-and shipped as plain strings that the library hands to redis-py's
-``register_script`` exactly as it did before::
+fewer and an import that costs nothing. Generating the scripts ahead of time
+serves both: they are written in Python, compiled when a maintainer runs this,
+and shipped as a module that needs nothing but the standard library::
 
     python -m redis_lua_py generate myproj.scripts --out src/myproj/_lua.py
+
+Each script in that module is a function with the signature it was written
+with, called the way a ``@script`` is::
+
+    from myproj._lua import rate_limit
+
+    rate_limit(client, key="user:42", limit=10, ttl=60)
 
 A test keeps the checked-in output honest::
 
@@ -20,14 +26,18 @@ A test keeps the checked-in output honest::
 
 from __future__ import annotations
 
+import ast
 import difflib
 import importlib
+import inspect
 import re
+from functools import cache
 from itertools import islice
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from . import _portable
 from ._compile import provenance
 from ._script import CompiledScript
 from .errors import RedisLuaError, StaleLuaError
@@ -45,6 +55,29 @@ _QUOTE_RUNS = re.compile(r'"{3,}|"+\Z')
 #: Characters Python's reader would change or refuse inside a literal. A bare
 #: carriage return, for one, is read back as a newline.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+#: What a generated module imports: what the portable runtime needs, and what a
+#: generated signature can name. Nothing outside the standard library.
+_IMPORTS = """\
+from __future__ import annotations
+
+from collections.abc import Awaitable, Iterable
+from typing import Any, Protocol, overload
+from weakref import WeakKeyDictionary
+"""
+
+#: Where formatters wrap by default. Anything longer is written one item per
+#: line with a trailing comma, which black and ruff both leave as it is.
+_WIDTH = 88
+
+#: The annotations a generated signature can repeat as written, because they
+#: name nothing from the module the scripts came from.
+_ARGUMENT_TYPES = frozenset({"bool", "bytes", "float", "int", "memoryview", "str"})
+_RETURN_TYPES = _ARGUMENT_TYPES | {"Any", "None", "dict", "list", "object", "set", "tuple"}
+
+#: The runtime names a generated function's body refers to, which a parameter
+#: of the same name would shadow.
+_BODY_NAMES = frozenset({"_run", "_encode", "_encode_all", "_items"})
 
 
 def collect(module: ModuleType | str) -> dict[str, CompiledScript[Any]]:
@@ -69,9 +102,9 @@ def collect(module: ModuleType | str) -> dict[str, CompiledScript[Any]]:
 def render(module: ModuleType | str, out: str | Path) -> dict[Path, str]:
     """The files :func:`generate` would write, and what each would hold.
 
-    An ``out`` ending in ``.py`` is one Python module holding every script as a
-    string constant, and importing nothing. Anything else is a directory, with
-    one ``.lua`` file per script.
+    An ``out`` ending in ``.py`` is one Python module, importing only the
+    standard library, with a function per script and its Lua as a string
+    constant. Anything else is a directory, with one ``.lua`` file per script.
     """
     loaded = _load(module)
     scripts = collect(loaded)
@@ -166,35 +199,210 @@ def _diff(path: Path, before: str | None, after: str | None) -> str:
     return text if text.endswith("\n") else text + "\n"
 
 
-def _python_module(module_name: str, scripts: dict[str, CompiledScript[Any]], out: Path) -> str:
-    constants: dict[str, str] = {}
-    for name in scripts:
-        constant = name.upper()
-        if constant in constants:
-            raise RedisLuaError(
-                f"{constants[constant]!r} and {name!r} would both be written as {constant}. "
-                "Rename one of them."
-            )
-        constants[constant] = name
+@cache
+def _runtime() -> str:
+    """The portable runtime as a generated module carries it: without its docstring or imports."""
+    source = inspect.getsource(_portable)
+    tree = ast.parse(source)
+    end = max(
+        node.end_lineno or 0 for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)
+    )
+    return "\n".join(source.splitlines()[end:]).strip("\n") + "\n"
 
+
+@cache
+def _reserved() -> frozenset[str]:
+    """Every name a generated module binds before its first script."""
+    names: set[str] = set()
+    for node in ast.parse(_IMPORTS + _runtime()).body:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            names.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.FunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return frozenset(names)
+
+
+def _python_module(module_name: str, scripts: dict[str, CompiledScript[Any]], out: Path) -> str:
+    owners = dict.fromkeys(_reserved(), "the generated runtime")
+    for name, script in scripts.items():
+        for generated in (name, _constant_name(name), _registry_name(name)):
+            if generated in owners:
+                raise RedisLuaError(
+                    f"script {name!r} would be written as {generated}, which "
+                    f"{owners[generated]} already uses. Rename one of them."
+                )
+            owners[generated] = f"script {name!r}"
+        shadowed = sorted(
+            set(script.params) & {*_BODY_NAMES, _constant_name(name), _registry_name(name)}
+        )
+        if shadowed:
+            raise RedisLuaError(
+                f"{name}() has a parameter named {shadowed[0]!r}, which the generated "
+                "function needs for itself. Rename the parameter."
+            )
+
+    exported = sorted([*scripts, *map(_constant_name, scripts)], key=lambda n: (not n.isupper(), n))
     # The path is repo-relative for the same reason the Lua header is: the file
     # is checked in, and must come out the same on every machine.
     parts = [
         f'"""Redis Lua scripts compiled by redis-lua-py from {module_name}. Do not edit.\n'
+        "\n"
+        "Each script is a function taking a redis-py client, sync or async, and then the\n"
+        "arguments it was written with. Its Lua is the constant of the same name in\n"
+        "capitals.\n"
         "\n"
         "Regenerate with:\n"
         "\n"
         f"    python -m redis_lua_py generate {module_name} --out "
         f"{provenance(str(out.resolve()))}\n"
         '"""\n',
-        "__all__ = [\n" + "".join(f'    "{constant}",\n' for constant in constants) + "]\n",
+        _IMPORTS,
+        "__all__ = [\n" + "".join(f'    "{name}",\n' for name in exported) + "]\n",
+        _runtime(),
     ]
-    for constant, name in constants.items():
-        script = scripts[name]
+    for name, script in scripts.items():
         parts.append(
-            f"# {name} -- {_call_order(script)}\n{constant} = {_python_string(script.lua)}\n"
+            f"# {name} -- {_call_order(script)}\n"
+            f"{_constant_name(name)} = {_python_string(script.lua)}\n"
+            f"{_registry_name(name)}: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()\n"
         )
-    return "\n".join(parts)
+        parts.append(_function(name, script))
+
+    # One blank line after the docstring and after the imports, two around
+    # everything at the top level after that, as formatters would have it.
+    head, imports, *rest = (part.strip("\n") for part in parts)
+    return f"{head}\n\n{imports}\n\n" + "\n\n\n".join(rest) + "\n"
+
+
+def _constant_name(name: str) -> str:
+    return name.upper()
+
+
+def _registry_name(name: str) -> str:
+    return f"_{name.upper()}_CLIENTS"
+
+
+def _function(name: str, script: CompiledScript[Any]) -> str:
+    """The typed function that calls one script: two overloads and the body."""
+    client = "client"
+    while client in script.params:
+        client = f"_{client}"
+    returns = _spelled(_parse(script.return_annotation), _RETURN_TYPES) or "Any"
+
+    params: list[str] = []
+    annotations = script.param_annotations or (None,) * len(script.params)
+    for param, annotation in zip(script.params, annotations, strict=True):
+        if param in script.keyword_only and "*" not in params:
+            params.append("*")
+        params.append(f"{param}: {_parameter_type(script, param, annotation)}")
+
+    def signature(client_type: str, result: str, suffix: str) -> str:
+        return _fit(
+            "",
+            f"def {name}(",
+            [f"{client}: {client_type}", "/", *params],
+            f") -> {result}:{suffix}",
+        )
+
+    keys = [f'*_items("{k}", {k})' if k == script.variadic_key else k for k in script.keys]
+    argv = [
+        f'*_encode_all("{a}", {a})' if a == script.variadic_arg else f'_encode("{a}", {a})'
+        for a in script.args
+    ]
+    body = [
+        "    return _run(",
+        f"        {_constant_name(name)},",
+        f"        {_registry_name(name)},",
+        f"        {client},",
+        _fit("        ", "[", keys, "],"),
+        _fit("        ", "[", argv, "],"),
+        "    )",
+    ]
+    if script.doc:
+        body.insert(0, _docstring(script.doc))
+
+    return "\n".join(
+        [
+            "@overload",
+            signature("_AsyncClient", f"Awaitable[{returns}]", " ..."),
+            "@overload",
+            signature("Any", returns, " ..."),
+            signature("Any", "Any", ""),
+            *body,
+        ]
+    )
+
+
+def _fit(indent: str, head: str, items: list[str], tail: str) -> str:
+    """``head``, the items and ``tail`` on one line if they fit, else one item per line."""
+    line = f"{indent}{head}{', '.join(items)}{tail}"
+    if len(line) <= _WIDTH or not items:
+        return line
+    inner = f"{indent}    "
+    return f"{indent}{head}\n" + "".join(f"{inner}{item},\n" for item in items) + f"{indent}{tail}"
+
+
+def _parameter_type(script: CompiledScript[Any], name: str, annotation: str | None) -> str:
+    """What a generated signature accepts for one parameter.
+
+    A key is whatever redis-py accepts for one, whatever it was annotated as. A
+    list parameter takes any iterable, as the runtime does. An argument keeps
+    its annotation when that names only builtins, and otherwise accepts
+    anything Redis has a representation for.
+    """
+    if name == script.variadic_key:
+        return "Iterable[_Key]"
+    if name in script.keys:
+        return "_Key"
+    node = _parse(annotation)
+    if name == script.variadic_arg:
+        item = node.slice if isinstance(node, ast.Subscript) else None
+        return f"Iterable[{_spelled(item, _ARGUMENT_TYPES) or '_Arg'}]"
+    return _spelled(node, _ARGUMENT_TYPES) or "_Arg"
+
+
+def _parse(annotation: str | None) -> ast.expr | None:
+    if annotation is None:
+        return None
+    try:
+        node = ast.parse(annotation, mode="eval").body
+    except SyntaxError:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _parse(node.value)  # a quoted annotation
+    return node
+
+
+def _spelled(node: ast.expr | None, names: frozenset[str]) -> str | None:
+    """The annotation as written, if every name in it is one of ``names``."""
+    if node is None:
+        return None
+    for part in ast.walk(node):
+        if isinstance(part, ast.Name):
+            if part.id not in names:
+                return None
+        elif isinstance(part, ast.Constant):
+            if not (part.value is None and "None" in names) and part.value is not Ellipsis:
+                return None
+        elif not isinstance(part, ast.BinOp | ast.BitOr | ast.Subscript | ast.Tuple | ast.Load):
+            return None
+    return ast.unparse(node)
+
+
+def _docstring(doc: str) -> str:
+    """A script's docstring, indented as the generated function's own."""
+    text = doc.replace("\\", "\\\\")
+    text = _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    text = _QUOTE_RUNS.sub(lambda m: '\\"' * len(m.group()), text)
+    first, *rest = text.split("\n")
+    if not rest:
+        return f'    """{first}"""'
+    lines = "".join(f"\n    {line}" if line else "\n" for line in rest)
+    return f'    """{first}{lines}\n    """'
 
 
 def _call_order(script: CompiledScript[Any]) -> str:

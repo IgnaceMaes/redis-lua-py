@@ -13,6 +13,7 @@ import sys
 import redis
 import redis.asyncio
 
+import generated_scripts
 from redis_lua_py import BoundScript, CompiledScript, Key, Library, LibraryFunction, script
 from redis_lua_py import redis as r
 
@@ -75,6 +76,16 @@ def check_a_library_function(client: redis.Redis) -> None:
 
 async def check_an_async_library_function(client: redis.asyncio.Redis) -> None:
     assert_type(await counted(client, k="x"), int)
+
+
+def check_a_generated_function(client: redis.Redis) -> None:
+    assert_type(generated_scripts.rate_limit(client, key="x", limit=1, ttl=1), int)
+    assert_type(generated_scripts.echo(client, "a", suffix="b"), bytes)
+    assert_type(generated_scripts.touch_all(client, keys=["a", b"b"], ttl=1), int)
+
+
+async def check_an_async_generated_function(client: redis.asyncio.Redis) -> None:
+    assert_type(await generated_scripts.rate_limit(client, key="x", limit=1, ttl=1), int)
 
 
 def test_the_annotation_does_not_change_what_runs() -> None:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import difflib
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, overload
 from weakref import WeakKeyDictionary
 
+from ._portable import _AsyncClient, _encode, _encode_all, _items, _registered, _run
 from .errors import ScriptArgumentError
 
 #: What a script's return annotation describes: the value the *caller* gets
@@ -17,56 +18,9 @@ R = TypeVar("R")
 #: What calling a bound script produces -- ``R``, or an awaitable of it.
 T = TypeVar("T")
 
-
-class AsyncClient(Protocol):
-    """Enough of an async redis-py client to tell it from a sync one.
-
-    Only used to type the two shapes of call. ``__aenter__`` is the
-    discriminator because every async client has one and no sync client does,
-    on every supported redis-py -- ``aclose`` only arrived in redis-py 5.
-    """
-
-    async def __aenter__(self) -> Any: ...  # pragma: no cover - a typing shape
-
-    def register_script(self, script: str) -> Any: ...  # pragma: no cover
-
-
-def encode(name: str, value: object) -> str | bytes | memoryview:
-    """Render a Python value as a Redis argument.
-
-    Redis has no argument types: everything on the wire is a byte string. This
-    only accepts values whose string form is unambiguous, so that a stray None
-    or object fails here rather than arriving in Lua as something surprising.
-    """
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    if isinstance(value, str | bytes | memoryview):
-        return value
-    if isinstance(value, int | float):
-        return repr(value) if isinstance(value, float) else str(value)
-    raise ScriptArgumentError(
-        f"argument {name!r} is a {type(value).__name__}, which has no Redis representation. "
-        "Pass a str, bytes, int, float or bool."
-    )
-
-
-def _items(name: str, value: object) -> list[object]:
-    """The elements passed for a list parameter.
-
-    A string is iterable too, and splitting a key into characters is never
-    what was meant, so it is refused rather than spread.
-    """
-    if isinstance(value, str | bytes | memoryview) or not isinstance(value, Iterable):
-        raise ScriptArgumentError(
-            f"argument {name!r} takes a list, got a {type(value).__name__}. "
-            "Wrap a single value in a list."
-        )
-    return list(value)
-
-
-def _is_cluster_pipeline(client: object) -> bool:
-    cls = type(client)
-    return cls.__name__ == "ClusterPipeline" and cls.__module__.startswith("redis.")
+#: Enough of an async redis-py client to tell it from a sync one. It lives with
+#: the rest of the call path in ``_portable``, which generated modules copy.
+AsyncClient = _AsyncClient
 
 
 def resolve_arguments(
@@ -104,15 +58,15 @@ def resolve_arguments(
     resolved_keys: list[Any] = []
     for k in keys:
         if k == variadic_key:
-            resolved_keys.extend(_items(k, values[k]))
+            resolved_keys.extend(_items(k, values[k], ScriptArgumentError))
         else:
             resolved_keys.append(values[k])
     argv: list[Any] = []
     for a in args:
         if a == variadic_arg:
-            argv.extend(encode(a, item) for item in _items(a, values[a]))
+            argv.extend(_encode_all(a, values[a], ScriptArgumentError))
         else:
-            argv.append(encode(a, values[a]))
+            argv.append(_encode(a, values[a], ScriptArgumentError))
     return resolved_keys, argv
 
 
@@ -165,6 +119,13 @@ class CompiledScript(Generic[R]):
     variadic_key: str | None = None
     #: The list parameter whose elements fill the rest of ARGV.
     variadic_arg: str | None = None
+    #: Each parameter's annotation as written in the source, or None, in the
+    #: order of ``params``; what a generated function's signature is built from.
+    param_annotations: tuple[str | None, ...] = ()
+    #: The return annotation as written in the source, or None.
+    return_annotation: str | None = None
+    #: The parameters declared after a bare ``*``.
+    keyword_only: tuple[str, ...] = ()
     _registry: WeakKeyDictionary[Any, Any] = field(
         default_factory=WeakKeyDictionary, compare=False, repr=False
     )
@@ -179,12 +140,7 @@ class CompiledScript(Generic[R]):
 
     def __call__(self, client: Any, /, *positional: object, **keyword: object) -> Any:
         keys, argv = self.resolve(*positional, **keyword)
-        if _is_cluster_pipeline(client):
-            # redis-py refuses EVALSHA on a cluster pipeline, and a queued
-            # EVALSHA could not recover from NOSCRIPT at execute time anyway,
-            # so the source travels with the command.
-            return client.eval(self.lua, len(keys), *keys, *argv)
-        return self._for(client)(keys=keys, args=argv, client=client)
+        return _run(self.lua, self._registry, client, keys, argv)
 
     @overload
     def bind(self, client: AsyncClient) -> BoundScript[Awaitable[R]]: ...
@@ -215,20 +171,8 @@ class CompiledScript(Generic[R]):
         )
 
     def _for(self, client: Any) -> Any:
-        """Get the redis-py Script bound to this client, registering it once.
-
-        redis-py's own Script object already implements the EVALSHA-then-EVAL
-        dance and the NOSCRIPT retry, so this defers to it rather than
-        reimplementing script caching.
-        """
-        try:
-            registered = self._registry.get(client)
-        except TypeError:  # a client that does not support weak references
-            return client.register_script(self.lua)
-        if registered is None:
-            registered = client.register_script(self.lua)
-            self._registry[client] = registered
-        return registered
+        """Get the redis-py Script bound to this client, registering it once."""
+        return _registered(self.lua, self._registry, client)
 
     def __repr__(self) -> str:
         signature = ", ".join(self.params)

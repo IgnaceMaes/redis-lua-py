@@ -112,6 +112,9 @@ script(client, /, *positional, **keyword) -> Awaitable[R]   # async client
 | `args` | `tuple[str, ...]` | everything else, in `ARGV` order |
 | `variadic_key` | `str \| None` | the `list[Key]` parameter, which fills the rest of `KEYS` |
 | `variadic_arg` | `str \| None` | the list parameter that fills the rest of `ARGV` |
+| `param_annotations` | `tuple[str \| None, ...]` | each parameter's annotation as written, in `params` order |
+| `return_annotation` | `str \| None` | the return annotation as written |
+| `keyword_only` | `tuple[str, ...]` | the parameters declared after a bare `*` |
 | `doc` | `str \| None` | the function's docstring |
 | `source` | `str` | where it was defined, repo-relative |
 
@@ -227,8 +230,9 @@ package at runtime. See
 [Shipping without the dependency](../guide/build-time.md). Every function takes
 the module as a module object or a dotted name, and `out` as a path:
 
-- ending in `.py`, for one module holding every script as a string constant
-  and importing nothing
+- ending in `.py`, for one module importing only the standard library, with a
+  typed function per script, called the way the `@script` is, and its Lua as a
+  string constant
 - anything else, for a directory with one `.lua` file per script
 
 ### `codegen.generate`
