@@ -14,7 +14,8 @@ A Redis command with nothing to return hands Lua `false`, not `nil`. This is
 the classic trap: a hand-written `== nil` never matches, so the branch silently
 never runs. `x is None` compiles to a helper accepting both, which also takes
 `x` as an argument — so `if redis.hget(k, f) is None:` does not run the command
-twice.
+twice. `x == None` and `x != None` compile to the same helper, since that is
+plainly what they mean.
 
 ## Indexing is closed
 
