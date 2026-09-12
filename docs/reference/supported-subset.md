@@ -6,7 +6,11 @@ language with a faithful Lua meaning is accepted.
 **Supported:**
 
 - **Statements:** assignment, including unpacking (`a, b = b, a`);
-  augmented assignment; `if`/`elif`/`else`; `while`; `break`; `return`.
+  augmented assignment; `if`/`elif`/`else`; `while`; `break`; `continue`;
+  `return`.
+- **Errors:** `try` with one `except` (bare or `Exception`), `else` and
+  `finally`; `raise SomeError("message")`, and a bare `raise` inside `except`;
+  `assert`.
 - **Loops:** `for ... in` over a table, `range()`, `enumerate()`, or a dict's
   `.items()`, `.keys()` and `.values()`, binding a name or a tuple of names.
 - **Helper functions** defined with `def` at the top level of the body. They
@@ -27,11 +31,11 @@ Everything else raises
 with a caret under the line at fault:
 
 ```
-Lua 5.1 has no 'continue' statement
+chained comparisons are not supported
   File "/srv/app/limits.py", line 12
-    continue
-    ^
-  hint: Invert the condition and put the rest of the loop body inside the if.
+    if 0 < n < limit:
+       ^
+  hint: Split 'a < b < c' into 'a < b and b < c'.
 ```
 
 Failing at import, loudly, is deliberate. A body that looks like Python but is

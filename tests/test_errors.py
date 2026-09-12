@@ -7,15 +7,13 @@ import pytest
 from redis_lua_py import Key, UnsupportedSyntax, redis, script
 
 
-def test_continue_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="no 'continue' statement"):
+def test_with_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="'with' is not supported"):
 
         @script
-        def s(n: int) -> int:
-            for i in range(n):
-                if i == 2:
-                    continue
-            return n
+        def s(k: Key) -> int:
+            with open(k):
+                return 1
 
 
 def test_lambda_is_rejected() -> None:
@@ -84,8 +82,8 @@ def test_in_operator_is_rejected() -> None:
             return 0
 
 
-def test_try_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="exception handling"):
+def test_except_with_a_type_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="cannot be told apart"):
 
         @script
         def s(k: Key) -> int:
@@ -152,13 +150,12 @@ def test_varargs_are_rejected_with_a_pointer_to_list_parameters() -> None:
     assert "list[Key]" in info.value.hint
 
 
-def test_assert_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="assert is not supported"):
+def test_raise_from_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match=r"raise \.\.\. from"):
 
         @script
         def s(n: int) -> int:
-            assert n > 0
-            return n
+            raise RuntimeError("wrapped") from None
 
 
 def test_string_plus_is_rejected_with_a_pointer_to_fstrings() -> None:
@@ -174,13 +171,12 @@ def test_error_names_the_line_and_marks_the_column() -> None:
 
         @script
         def s(n: int) -> int:
-            for i in range(n):
-                continue
-            return n
+            double = lambda x: x * 2  # noqa: E731
+            return double(n)
 
     rendered = str(info.value)
     assert "test_errors.py" in rendered
-    assert "continue" in rendered
+    assert "lambda" in rendered
     assert "^" in rendered
     assert info.value.lineno > 0
 
