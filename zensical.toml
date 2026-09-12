@@ -1,0 +1,78 @@
+[project]
+site_name = "redis-lua-py"
+site_url = "https://ignacemaes.com/redis-lua-py/"
+site_description = "Write Redis Lua scripts as real Python functions, not strings. Compiled at import, checked by mypy, sent with EVALSHA."
+site_author = "Ignace Maes"
+copyright = "Copyright &copy; Ignace Maes"
+
+repo_url = "https://github.com/ignacemaes/redis-lua-py"
+repo_name = "ignacemaes/redis-lua-py"
+edit_uri = "edit/main/docs/"
+
+# A page that links to a page that does not exist is a broken site, and the
+# build is the only place that still cheaply catches it.
+validation = { invalid_links = true, invalid_link_anchors = true }
+
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    { "Installation" = "installation.md" },
+    { "Quickstart" = "quickstart.md" },
+  ] },
+  { "Guide" = [
+    { "What it compiles to" = "guide/generated-lua.md" },
+    { "Keys and arguments" = "guide/keys-and-arguments.md" },
+    { "Calling Redis commands" = "guide/calling-redis-commands.md" },
+    { "Constants from the module" = "guide/constants.md" },
+    { "Binary values" = "guide/binary-values.md" },
+    { "What the caller gets" = "guide/return-values.md" },
+    { "Async" = "guide/async.md" },
+    { "Binding a client" = "guide/binding-a-client.md" },
+    { "Testing your scripts" = "guide/testing.md" },
+  ] },
+  { "Reference" = [
+    { "The supported subset" = "reference/supported-subset.md" },
+    { "Where Lua differs from Python" = "reference/lua-vs-python.md" },
+    { "API reference" = "reference/api.md" },
+    { "Errors and warnings" = "reference/errors.md" },
+  ] },
+  { "Examples" = "examples.md" },
+  { "Project" = [
+    { "Development" = "development.md" },
+    { "Contributing" = "contributing.md" },
+    { "Changelog" = "https://github.com/ignacemaes/redis-lua-py/blob/main/CHANGELOG.md" },
+  ] },
+]
+
+[project.theme]
+name = "material"
+logo = "assets/logo.svg"
+favicon = "assets/logo.svg"
+features = [
+  "navigation.instant",
+  "navigation.tracking",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.footer",
+  "content.code.copy",
+  "content.action.edit",
+  "search.suggest",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle = { icon = "material/brightness-7", name = "Switch to dark mode" }
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle = { icon = "material/brightness-4", name = "Switch to light mode" }

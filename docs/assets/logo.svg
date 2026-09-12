@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="redis-lua-py">
+  <rect width="64" height="64" rx="14" fill="#000000"/>
+  <g transform="translate(7.6 7.6) scale(0.76)"><defs><mask id="l"><rect width="64" height="64" fill="#fff"/><path d="M40 15.8 L64.2 40 L40 64.2 L15.8 40 Z" fill="#000"/></mask></defs><g fill="none" stroke="#FFFFFF" stroke-width="6.0" stroke-linejoin="miter"><path mask="url(#l)" d="M8 8 H36 V36 H8 Z"/><path d="M40 20 L60 40 L40 60 L20 40 Z"/></g></g>
+</svg>
