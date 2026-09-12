@@ -60,7 +60,13 @@ _LUA_KEYWORDS = frozenset(
     ]
 )
 
-_ESCAPES = {"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\0": "\\0"}
+# NUL is spelled with all three digits on purpose: Lua reads up to three, so a
+# bare "\0" followed by a digit in the data would be read as a different byte.
+_ESCAPES = {"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\0": "\\000"}
+
+# Binary data gets no shorthand at all; every byte outside printable ASCII is
+# written as a three-digit escape, which cannot run into the byte after it.
+_BYTE_ESCAPES = {ord("\\"): "\\\\", ord("'"): "\\'"}
 
 
 def quote(value: str) -> str:
@@ -73,6 +79,26 @@ def quote(value: str) -> str:
             out.append(f"\\{ord(ch):03d}")
         else:
             out.append(ch)
+    return "'" + "".join(out) + "'"
+
+
+def quote_bytes(value: bytes) -> str:
+    r"""Render a Python bytes literal as a Lua string of exactly those bytes.
+
+    Lua strings are byte strings, so every byte has a representation -- but the
+    generated source travels to Redis as text, and anything outside ASCII would
+    have to survive that encoding intact. Escaping numerically sidesteps the
+    question: the literal is pure ASCII, and Lua's ``\ddd`` puts the original
+    bytes back.
+    """
+    out = []
+    for byte in value:
+        if byte in _BYTE_ESCAPES:
+            out.append(_BYTE_ESCAPES[byte])
+        elif 0x20 <= byte < 0x7F:
+            out.append(chr(byte))
+        else:
+            out.append(f"\\{byte:03d}")
     return "'" + "".join(out) + "'"
 
 
@@ -110,6 +136,13 @@ class Num(Expr):
 @dataclass(frozen=True, slots=True)
 class Str(Expr):
     value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Bytes(Expr):
+    """A bytes literal. Lua has no separate type; only the spelling differs."""
+
+    value: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +245,8 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
             return repr(v) if isinstance(v, float) else str(v)
         case Str(value=v):
             return quote(v)
+        case Bytes(value=v):
+            return quote_bytes(v)
         case Name(id=v):
             return v
         case Table(array=arr, hash=pairs):

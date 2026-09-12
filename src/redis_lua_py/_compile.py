@@ -9,16 +9,23 @@ place where a silent mistranslation would be most expensive.
 from __future__ import annotations
 
 import ast
+import difflib
 import inspect
 import textwrap
+import warnings
 from collections.abc import Callable
+from functools import cache
+from pathlib import Path
 from types import ModuleType
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar
 
 from . import _lua as lua
+from ._commands import COMMANDS, SUBCOMMANDS
 from ._runtime import _Namespace
 from ._script import CompiledScript
-from .errors import CompileError, UnsupportedSyntax
+from .errors import CompileError, NilTruncationWarning, UnsupportedSyntax, render_location
+
+R = TypeVar("R")
 
 # Members of the `redis` table that are not commands and keep their own name.
 _REDIS_DIRECT = frozenset(
@@ -39,6 +46,18 @@ _REDIS_DIRECT = frozenset(
 # Receivers are normally resolved by value. These spellings are the fallback
 # for a name that is not bound in the defining module at all.
 _RECEIVER_FALLBACK = {"redis": "redis", "call": "redis", "cjson": "cjson"}
+
+# redis-py method names that do not match the wire name of the command they
+# send. Spelling one of these the way redis-py does is not a mistake worth an
+# error -- it names exactly one command, unambiguously -- so it is simply
+# translated. Every other name is checked against the command table.
+_COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "delete": ("DEL",),
+}
+
+# Directories that mark the top of a project, for rendering the source path in
+# the generated header relative to something stable.
+_ROOT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", ".git")
 
 _UNBOUND = object()
 
@@ -139,6 +158,62 @@ class _Compiler:
             source_line=source_line,
             hint=hint,
         )
+
+    # --------------------------------------------------------------- constants
+
+    def module_constant(self, node: ast.expr, name: str) -> lua.Expr:
+        """Resolve a name the body did not bind, against the defining module.
+
+        A script has no closure: the body runs on the server, where nothing
+        from the Python process exists. A module-level constant is the
+        exception worth making, because the value is already a literal -- it
+        can simply be folded into the script. Without this the only way to
+        write a TTL the module already names is to repeat the number, which
+        turns the library's own argument about reviewability against it.
+        """
+        value = self.globalns.get(name, _UNBOUND)
+        if value is _UNBOUND:
+            self.fail(
+                node,
+                f"undefined name {name!r}",
+                hint="A script can only use its parameters, the names it assigns, and "
+                "module-level constants holding an int, float, str, bytes or bool.",
+            )
+        return self.fold(node, name, value)
+
+    def module_attribute(self, node: ast.Attribute) -> lua.Expr:
+        """Fold a dotted module-level constant, such as an enum member.
+
+        ``Priority.HIGH`` and ``settings.SESSION_TTL`` name a constant just as
+        plainly as a bare global does, and naming constants that way is common
+        enough that refusing it would push bodies back towards magic numbers.
+        """
+        parts = _dotted_name(node)
+        if parts is not None:
+            root = self.globalns.get(parts[0], _UNBOUND)
+            # A namespace answers to every attribute with a call stub, and
+            # redis-py has a clearer error of its own; neither is a constant.
+            if root is not _UNBOUND and not isinstance(root, _Namespace) and not _is_redis_py(root):
+                value: object = root
+                for attr in parts[1:]:
+                    value = getattr(value, attr, _UNBOUND)
+                    if value is _UNBOUND:
+                        break
+                else:
+                    return self.fold(node, ".".join(parts), value)
+        self.fail(node, f"attribute access .{node.attr} is not supported here")
+
+    def fold(self, node: ast.expr, label: str, value: object) -> lua.Expr:
+        literal = _as_literal(value)
+        if literal is None:
+            self.fail(
+                node,
+                f"{label!r} is a module-level {type(value).__name__}, which has no Lua literal",
+                hint="Only an int, float, str, bytes or bool constant is folded into the "
+                "script. Pass anything else as an argument, or name the literal it "
+                "reduces to.",
+            )
+        return literal
 
     # ---------------------------------------------------------------- scoping
 
@@ -252,15 +327,10 @@ class _Compiler:
             case ast.Constant(value=str() as v):
                 return lua.Str(v)
             case ast.Constant(value=bytes() as v):
-                return lua.Str(v.decode("utf-8", "surrogateescape"))
+                return lua.Bytes(v)
             case ast.Name(id=name):
                 if name not in self.known:
-                    self.fail(
-                        node,
-                        f"undefined name {name!r}",
-                        hint="A script can only use its parameters and names it assigns; "
-                        "values from the enclosing Python scope are not available.",
-                    )
+                    return self.module_constant(node, name)
                 return lua.Name(name)
             case ast.BinOp():
                 return self.binop(node)
@@ -301,8 +371,8 @@ class _Compiler:
                 return lua.Table(hash=tuple(pairs))
             case ast.JoinedStr(values=values):
                 return self.fstring(node, values)
-            case ast.Attribute(attr=attr):
-                self.fail(node, f"attribute access .{attr} is not supported here")
+            case ast.Attribute():
+                return self.module_attribute(node)
             case _:
                 self.fail(node, f"{type(node).__name__} expressions are not supported")
 
@@ -473,9 +543,76 @@ class _Compiler:
             return lua.Call(lua.Index(lua.Name("redis"), lua.Str(attr)), args)
         if attr.startswith("_"):
             self.fail(node, f"redis.{attr} is not a Redis command")
-        # `zrangebyscore` -> ZRANGEBYSCORE; `script_load` -> SCRIPT LOAD.
-        tokens = tuple(lua.Str(part.upper()) for part in attr.split("_") if part)
+        tokens = tuple(lua.Str(token) for token in self.command_tokens(node, attr))
         return lua.Call(lua.Index(lua.Name("redis"), lua.Str("call")), tokens + args)
+
+    def command_tokens(self, node: ast.Call, attr: str) -> tuple[str, ...]:
+        """Turn an attribute name into the command tokens Redis expects.
+
+        Checked against the command table rather than uppercased and hoped
+        for. Uppercasing alone turns any attribute into a plausible command:
+        ``redis.delete(k)`` reads correctly to anyone who knows redis-py, where
+        the method really is ``.delete()``, and compiles to a DELETE that Redis
+        does not have. Nothing would then catch it until that branch first ran
+        -- inside a script whose whole purpose was to be atomic.
+        """
+        alias = _COMMAND_ALIASES.get(attr)
+        if alias is not None:
+            return alias
+
+        upper = attr.upper()
+        if upper in COMMANDS and upper not in SUBCOMMANDS:
+            # SORT_RO and the other read-only variants carry a real underscore;
+            # splitting would make the RO a stray argument.
+            return (upper,)
+
+        # `zrangebyscore` -> ZRANGEBYSCORE; `script_load` -> SCRIPT LOAD.
+        tokens = tuple(part for part in upper.split("_") if part)
+        head, rest = tokens[0], tokens[1:]
+        if head in SUBCOMMANDS:
+            return (head, *self.subcommand_tokens(node, attr, head, rest))
+        if head in COMMANDS:
+            # Any further tokens stay literal arguments, which is how the
+            # subcommands of a non-container command are written: DEBUG OBJECT.
+            return tokens
+        if "-".join(tokens) in COMMANDS:
+            return ("-".join(tokens),)
+        self.fail(
+            node,
+            f"Redis has no {' '.join(tokens)} command",
+            hint=_did_you_mean(attr, _COMMAND_SPELLINGS)
+            or f"If it comes from a module or a newer server, call it by name: "
+            f"redis.call('{' '.join(tokens)}', ...), which is never checked.",
+        )
+
+    def subcommand_tokens(
+        self, node: ast.Call, attr: str, head: str, rest: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        valid = SUBCOMMANDS[head]
+        if not rest:
+            self.fail(
+                node,
+                f"{head} is a container command and needs a subcommand",
+                hint=f"Write redis.{attr}_<subcommand>(...), one of: "
+                f"{_listing(sorted(name.lower() for name in valid))}",
+            )
+        # CLIENT NO-EVICT and MEMORY MALLOC-STATS are hyphenated, which an
+        # attribute name cannot carry. The joined spelling is tried first so
+        # that the hyphen wins over a same-named single-word subcommand.
+        joined = "-".join(rest)
+        if joined in valid:
+            return (joined,)
+        if rest[0] in valid:
+            return rest
+        self.fail(
+            node,
+            f"{head} has no {rest[0]} subcommand",
+            hint=_did_you_mean(
+                joined.lower().replace("-", "_"),
+                {name.lower().replace("-", "_") for name in valid},
+                prefix=f"{head.lower()}_",
+            ),
+        )
 
     # ------------------------------------------------------------ conditions
 
@@ -532,8 +669,12 @@ class _Compiler:
                 synthetic = ast.BinOp(left=target, op=op, right=value)
                 ast.copy_location(synthetic, node)
                 return self.assign(node, target, synthetic, augmented=True)
-            case ast.Return(value=value):
-                return [lua.Return(None if value is None else self.expr(value))]
+            case ast.Return(value=None):
+                return [lua.Return(None)]
+            case ast.Return(value=ast.expr() as value):
+                rendered = self.expr(value)
+                self.check_reply(value, rendered)
+                return [lua.Return(rendered)]
             case ast.If():
                 return [self.if_stmt(node)]
             case ast.For():
@@ -572,6 +713,27 @@ class _Compiler:
                 self.fail(node, "'global' and 'nonlocal' are not supported")
             case _:
                 self.fail(node, f"{type(node).__name__} statements are not supported")
+
+    def check_reply(self, node: ast.expr, rendered: lua.Expr) -> None:
+        """Refuse a returned table that is known to hold a nil.
+
+        Redis converts a returned Lua array by walking it until the first nil
+        and stopping there, so the reply is silently cut short rather than
+        carrying a null in the middle. A literal nil in the table is never what
+        the author meant, and it is invisible at the call site: the caller gets
+        a shorter list, not a null.
+        """
+        if not isinstance(node, ast.List | ast.Tuple) or not isinstance(rendered, lua.Table):
+            return
+        for element, compiled in zip(node.elts, rendered.array, strict=True):
+            if isinstance(compiled, lua.Nil):
+                self.fail(
+                    element,
+                    "a nil in a returned table truncates the reply at that point",
+                    hint="Redis stops converting the array at the first nil, so the caller "
+                    "sees a shorter list rather than a null. Return a placeholder value "
+                    "such as 0 or '' instead.",
+                )
 
     def call_statement(self, node: ast.Call) -> list[lua.Stat]:
         # `items.append(x)` is the one method call worth special-casing: it is
@@ -687,6 +849,77 @@ class _Compiler:
         return lua.BinOp("+" if delta > 0 else "-", expr, lua.Num(abs(delta)))
 
 
+def _unassigned_in_returns(
+    body: list[ast.stmt], assigned: set[str], tracked: set[str]
+) -> list[tuple[ast.expr, str]]:
+    """Names returned inside a table that are not assigned on every path.
+
+    The mirror image of the hoisting the compiler already does. Hoisting keeps
+    a name assigned in one branch readable after the block -- but on a path
+    where the assignment did not run, the name is nil, and a nil inside a
+    returned table truncates the reply there. That is invisible at the call
+    site, so it is worth pointing at.
+
+    Only names the body assigns somewhere are tracked; a name it never assigns
+    is a compile error already. Branches that always leave are excluded from
+    the intersection, so `if not x: return 0` really does establish x below.
+    """
+    found: list[tuple[ast.expr, str]] = []
+
+    def walk(statements: list[ast.stmt], live: set[str]) -> bool:
+        """Compile-time flow over one block; True if it always leaves."""
+        for statement in statements:
+            match statement:
+                case ast.Return(value=ast.List(elts=elts) | ast.Tuple(elts=elts)):
+                    found.extend(
+                        (element, element.id)
+                        for element in elts
+                        if isinstance(element, ast.Name)
+                        and element.id in tracked
+                        and element.id not in live
+                    )
+                    return True
+                case ast.Return() | ast.Break():
+                    return True
+                case ast.Assign(targets=targets):
+                    live.update(t.id for t in targets if isinstance(t, ast.Name))
+                case (
+                    ast.AnnAssign(target=ast.Name(id=name))
+                    | ast.AugAssign(target=ast.Name(id=name))
+                ):
+                    live.add(name)
+                case ast.If(body=then, orelse=otherwise):
+                    surviving = []
+                    branch = set(live)
+                    if not walk(then, branch):
+                        surviving.append(branch)
+                    if otherwise:
+                        other = set(live)
+                        if not walk(otherwise, other):
+                            surviving.append(other)
+                    else:
+                        # The absent else is a path, and it assigns nothing.
+                        surviving.append(set(live))
+                    if not surviving:
+                        return True
+                    # Replaced, not intersected in place: every surviving set
+                    # starts as a copy of `live`, so the names they agree on
+                    # are exactly what is assigned after the block.
+                    live.clear()
+                    live.update(set.intersection(*surviving))
+                case ast.For(target=ast.Name(id=name), body=inner):
+                    # A loop may run zero times, so nothing it assigns is live
+                    # after it -- including the loop variable, which in Lua
+                    # does not outlive the loop at all.
+                    walk(inner, set(live) | {name})
+                case ast.While(body=inner) | ast.For(body=inner):
+                    walk(inner, set(live))
+        return False
+
+    walk(body, set(assigned))
+    return found
+
+
 class _Block(lua.Stat):
     """Several statements where the grammar expects one."""
 
@@ -694,6 +927,64 @@ class _Block(lua.Stat):
 
     def __init__(self, body: list[lua.Stat]) -> None:
         self.body = body
+
+
+#: Every spelling the compiler accepts for a command, for suggesting a near
+#: miss. Container commands are left out: they need a subcommand, and the
+#: subcommand error says so more precisely.
+_COMMAND_SPELLINGS = {name.lower() for name in COMMANDS if name not in SUBCOMMANDS} | set(
+    _COMMAND_ALIASES
+)
+
+
+def _listing(names: list[str], limit: int = 6) -> str:
+    """A comma-separated sample, only trailing off when there is more."""
+    shown = ", ".join(names[:limit])
+    return f"{shown}, ..." if len(names) > limit else shown
+
+
+def _did_you_mean(attr: str, options: set[str], prefix: str = "") -> str | None:
+    """A hint naming the closest spelling, when there is a close one."""
+    matches = difflib.get_close_matches(attr, options, n=1, cutoff=0.7)
+    if not matches:
+        return None
+    return f"Did you mean redis.{prefix}{matches[0]}()?"
+
+
+def _dotted_name(node: ast.expr) -> tuple[str, ...] | None:
+    """The parts of a dotted name, if that is all the expression is."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return tuple(reversed(parts))
+
+
+def _as_literal(value: object) -> lua.Expr | None:
+    """The Lua literal for a Python constant, or None if it has none.
+
+    ``bool`` is checked before ``int`` because it is one, and normalising
+    through ``int()``/``str()`` keeps subclasses -- an ``IntEnum`` member, say
+    -- from emitting their ``repr``.
+    """
+    match value:
+        case bool():
+            return lua.Bool(value)
+        case int():
+            return lua.Num(int(value))
+        case float():
+            return lua.Num(float(value))
+        case str():
+            return lua.Str(str(value))
+        case bytes():
+            return lua.Bytes(bytes(value))
+        case None:
+            return lua.Nil()
+        case _:
+            return None
 
 
 def _literal_int(node: ast.expr) -> int | None:
@@ -741,7 +1032,35 @@ def parse_function(func: Callable[..., Any]) -> tuple[ast.FunctionDef, str, int,
     return node, filename, first_lineno, source.splitlines()
 
 
-def compile_function(func: Callable[..., Any], *, name: str | None = None) -> CompiledScript:
+@cache
+def _project_root(directory: Path) -> Path | None:
+    """The nearest ancestor that looks like the top of a project."""
+    for candidate in (directory, *directory.parents):
+        if any((candidate / marker).exists() for marker in _ROOT_MARKERS):
+            return candidate
+    return None
+
+
+def provenance(filename: str) -> str:
+    """The source path as the generated header should record it.
+
+    Repo-relative, because the header is part of the script body and the body
+    is what EVALSHA hashes. An absolute path would give the same script a
+    different SHA on a laptop, in CI and in a container -- so the server's
+    script cache would be cold once per environment rather than once per
+    script -- and would put build-machine paths on the Redis server, where
+    they show up in SCRIPT output.
+    """
+    path = Path(filename)
+    if not path.is_absolute():
+        return filename
+    root = _project_root(path.parent)
+    return path.name if root is None else path.relative_to(root).as_posix()
+
+
+def compile_function(
+    func: Callable[..., R], *, name: str | None = None, header: bool = True
+) -> CompiledScript[R]:
     node, filename, first_lineno, lines = parse_function(func)
     compiler = _Compiler(
         node,
@@ -765,11 +1084,30 @@ def compile_function(func: Callable[..., Any], *, name: str | None = None) -> Co
     if compiler.hoisted:
         prelude.append(lua.Local(sorted(compiler.hoisted), []))
 
-    header = [
-        f"-- {name or func.__name__}",
-        f"-- Generated by redis-lua-py from {filename}:{first_lineno}. Do not edit.",
-    ]
-    parts = ["\n".join(header)]
+    for element, unassigned in _unassigned_in_returns(body, set(compiler.params), compiler.known):
+        warnings.warn_explicit(
+            render_location(
+                f"{unassigned!r} is not assigned on every path to this return, and a nil "
+                "in a returned table truncates the reply there",
+                filename=filename,
+                lineno=first_lineno + element.lineno - 1,
+                col=element.col_offset,
+                source_line=lines[element.lineno - 1] if element.lineno <= len(lines) else None,
+                hint="Give it a value before the branch, so that every branch returns a "
+                "table of the same shape.",
+            ),
+            NilTruncationWarning,
+            filename,
+            first_lineno + element.lineno - 1,
+        )
+
+    parts: list[str] = []
+    if header:
+        parts.append(
+            f"-- {name or func.__name__}\n"
+            f"-- Generated by redis-lua-py from "
+            f"{provenance(filename)}:{first_lineno}. Do not edit."
+        )
     if compiler.needs_truthy:
         parts.append(_TRUTHY_HELPER.rstrip())
     if compiler.needs_isnil:

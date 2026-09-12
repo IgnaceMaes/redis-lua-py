@@ -3,11 +3,31 @@
 from __future__ import annotations
 
 import difflib
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generic, Protocol, TypeVar, overload
 from weakref import WeakKeyDictionary
 
 from .errors import ScriptArgumentError
+
+#: What a script's return annotation describes: the value the *caller* gets
+#: back, after Redis has converted the Lua value and redis-py has decoded it.
+R = TypeVar("R")
+
+#: What calling a bound script produces -- ``R``, or an awaitable of it.
+T = TypeVar("T")
+
+
+class AsyncClient(Protocol):
+    """Enough of an async redis-py client to tell it from a sync one.
+
+    Only used to type the two shapes of call. ``aclose`` is the discriminator
+    because every async client has one and no sync client does.
+    """
+
+    async def aclose(self) -> None: ...  # pragma: no cover - a typing shape
+
+    def register_script(self, script: str) -> Any: ...  # pragma: no cover
 
 
 def encode(name: str, value: object) -> str | bytes | memoryview:
@@ -30,12 +50,17 @@ def encode(name: str, value: object) -> str | bytes | memoryview:
 
 
 @dataclass(frozen=True)
-class CompiledScript:
+class CompiledScript(Generic[R]):
     """A Python function compiled to Lua, callable against a Redis client.
 
     Calling it runs EVALSHA and falls back to EVAL the first time, or whenever
     the server has dropped the script from its cache. Pass a sync client and
     you get a value; pass an async client and you get an awaitable.
+
+    The type parameter is the function's return annotation, which describes
+    what the *caller* receives -- not what the body returns on the Lua side.
+    Redis renders every reply as bytes, so a script returning a Lua string is
+    annotated ``bytes``; see the README on writing a body against that.
     """
 
     name: str
@@ -49,11 +74,25 @@ class CompiledScript:
         default_factory=WeakKeyDictionary, compare=False, repr=False
     )
 
+    @overload
+    def __call__(
+        self, client: AsyncClient, /, *positional: object, **keyword: object
+    ) -> Awaitable[R]: ...
+
+    @overload
+    def __call__(self, client: Any, /, *positional: object, **keyword: object) -> R: ...
+
     def __call__(self, client: Any, /, *positional: object, **keyword: object) -> Any:
         keys, argv = self.resolve(*positional, **keyword)
         return self._for(client)(keys=keys, args=argv, client=client)
 
-    def bind(self, client: Any) -> BoundScript:
+    @overload
+    def bind(self, client: AsyncClient) -> BoundScript[Awaitable[R]]: ...
+
+    @overload
+    def bind(self, client: Any) -> BoundScript[R]: ...
+
+    def bind(self, client: Any) -> BoundScript[Any]:
         """Attach a client, so that callers stop repeating it.
 
         The unbound form keeps working; this only removes the first argument.
@@ -113,14 +152,19 @@ class CompiledScript:
 
 
 @dataclass(frozen=True)
-class BoundScript:
-    """A script with its client already attached, produced by :meth:`bind`."""
+class BoundScript(Generic[T]):
+    """A script with its client already attached, produced by :meth:`bind`.
 
-    script: CompiledScript
+    The type parameter is what a call returns: the script's own return type
+    for a sync client, an awaitable of it for an async one.
+    """
+
+    script: CompiledScript[Any]
     client: Any
 
-    def __call__(self, *positional: object, **keyword: object) -> Any:
-        return self.script(self.client, *positional, **keyword)
+    def __call__(self, *positional: object, **keyword: object) -> T:
+        result: T = self.script(self.client, *positional, **keyword)
+        return result
 
     @property
     def name(self) -> str:

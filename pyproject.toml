@@ -66,4 +66,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "N", "C4", "PT"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src"]
+# test_typing.py carries assert_type() claims about what a call returns, which
+# are only worth anything if mypy actually reads them.
+files = ["src", "tests/test_typing.py"]
+mypy_path = "tests"
+
+# A script body returns Lua-side values, whose Python type is Any by
+# construction -- nothing about `redis.get(k)` is knowable to a type checker.
+# Under strict, warn_return_any flags exactly that, on the one function whose
+# body Python never runs. Adopters need the same override; the README says so.
+[[tool.mypy.overrides]]
+module = "test_typing"
+warn_return_any = false

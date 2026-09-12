@@ -18,7 +18,7 @@ def rate_limit(key: Key, limit: int, ttl: int) -> int:
 
 
 @script
-def claim_jobs(queue: Key, processing: Key, now: int, limit: int) -> list[str]:
+def claim_jobs(queue: Key, processing: Key, now: int, limit: int) -> list[bytes]:
     """Atomically move due jobs from a sorted set into a processing hash."""
     ids = redis.zrangebyscore(queue, 0, now, "LIMIT", 0, limit)
     claimed = []
