@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# One release train at a time. A push landing while the release PR is being
+# recomputed would otherwise race it and leave a half-updated PR behind.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Maintain the release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the version bump, create the tag and the release
+      pull-requests: write # open and update the release PR
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # Reads the conventional commit subjects since the last tag and keeps a
+      # single open PR that bumps the version and writes CHANGELOG.md. Merging
+      # that PR is what cuts the release; every other push just refreshes it.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    name: Build the distribution
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/redis-lua-py
+    permissions:
+      # Trusted publishing: PyPI verifies this workflow's identity, so no API
+      # token needs to be stored anywhere. Configure the publisher at
+      # https://pypi.org/manage/project/redis-lua-py/settings/publishing/
+      # with workflow name "release.yml" and environment "pypi".
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
