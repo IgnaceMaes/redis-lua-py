@@ -18,7 +18,7 @@ a type checker knows which of the two you are looking at:
 sync_client: redis.Redis
 async_client: redis.asyncio.Redis
 
-a = rate_limit(sync_client, key="u:1", limit=10, ttl=60)   # int
+a = rate_limit(sync_client, key="u:1", limit=10, ttl=60)  # int
 b = rate_limit(async_client, key="u:1", limit=10, ttl=60)  # Awaitable[int]
 ```
 

@@ -36,17 +36,17 @@ Pass `@script(header=False)` to drop the comment entirely:
 
 ```python
 @script(header=False)
-def rate_limit(key: Key, limit: int, ttl: int) -> int:
-    ...
+def rate_limit(key: Key, limit: int, ttl: int) -> int: ...
 ```
 
 ## What else a script exposes
 
-```python
-rate_limit.lua     # the full Lua source, as sent to Redis
-rate_limit.keys    # ('key',)     — the parameters annotated Key, in order
-rate_limit.args    # ('limit', 'ttl')
-rate_limit.name    # 'rate_limit'
-```
+| Attribute | For the script above |
+| --- | --- |
+| `.lua` | the full Lua source, exactly as sent to Redis |
+| `.keys` | `('key',)` — the parameters annotated `Key`, in order |
+| `.args` | `('limit', 'ttl')` |
+| `.name` | `'rate_limit'` |
+| `.source` | where it was defined, repo-relative |
 
 A [bound script](binding-a-client.md) exposes all of the same.
