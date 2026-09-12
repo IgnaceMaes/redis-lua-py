@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.2.1](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.2.0...v0.2.1) (2026-09-12)
+
+
+### Documentation
+
+* add a documentation site built with zensical ([#4](https://github.com/IgnaceMaes/redis-lua-py/issues/4)) ([f877f97](https://github.com/IgnaceMaes/redis-lua-py/commit/f877f97c0b7c8126ab62ef2324aff99106434ee4))
+
 ## [0.2.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.1.0...v0.2.0) (2026-09-12)
 
 Everything raised by the first adoption report of 0.1.0
