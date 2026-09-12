@@ -61,6 +61,8 @@ class ExpressionCompiler(ScopeCompiler):
                 return self.fstring(node, values)
             case ast.Attribute():
                 return self.module_attribute(node)
+            case ast.Lambda():
+                return self.lambda_expr(node)
             case _:
                 self.fail(node, f"{type(node).__name__} expressions are not supported")
 
@@ -69,6 +71,11 @@ class ExpressionCompiler(ScopeCompiler):
         if isinstance(node.op, ast.Add) and "str" in (left_kind, right_kind):
             # `+` on a string concatenates in Python; Lua spells that `..`.
             return lua.BinOp("..", self.expr(node.left), self.expr(node.right))
+        if isinstance(node.op, ast.Add) and "num" not in (left_kind, right_kind):
+            # Neither side is known to be a number or a string, so whether this
+            # joins or adds is only known at runtime. Lua's + adds "1" and "2".
+            self.helpers.add("__add")
+            return lua.Call(lua.Name("__add"), (self.expr(node.left), self.expr(node.right)))
         if isinstance(node.op, ast.Mod) and left_kind == "str":
             return self.percent_format(node)
         if isinstance(node.op, ast.Mult) and "str" in (left_kind, right_kind):
@@ -101,11 +108,7 @@ class ExpressionCompiler(ScopeCompiler):
 
     def compare(self, node: ast.Compare) -> lua.Expr:
         if len(node.ops) != 1:
-            self.fail(
-                node,
-                "chained comparisons are not supported",
-                hint="Split 'a < b < c' into 'a < b and b < c'.",
-            )
+            return self.chained_compare(node)
         op_node, right_node = node.ops[0], node.comparators[0]
         if isinstance(op_node, ast.In | ast.NotIn):
             return self.membership(node.left, right_node, negate=isinstance(op_node, ast.NotIn))
@@ -127,8 +130,60 @@ class ExpressionCompiler(ScopeCompiler):
             self.fail(node, f"the {type(op_node).__name__} comparison is not supported")
         return lua.BinOp(op, left, self.expr(right_node))
 
+    def chained_compare(self, node: ast.Compare) -> lua.Expr:
+        """``a < b < c``, which is ``a < b and b < c`` with ``b`` evaluated once.
+
+        A middle operand that is a name or a literal is simply repeated. Any
+        other runs in a function called on the spot, where each operand is
+        bound to a local just before its comparison -- so it is evaluated once,
+        in order, and only if every comparison before it held, as in Python.
+        """
+        operands = [node.left, *node.comparators]
+        if all(is_cheap(operand) for operand in operands[1:-1]):
+            tests = [
+                self.compare(self.comparison(node, left, op, right))
+                for left, op, right in zip(operands, node.ops, operands[1:], strict=False)
+            ]
+            result = tests[0]
+            for test in tests[1:]:
+                result = lua.BinOp("and", result, test)
+            return result
+
+        body: list[lua.Stat] = []
+        left = self.bind_operand(operands[0], body)
+        for position, (op, right) in enumerate(zip(node.ops, node.comparators, strict=True)):
+            if position == len(node.ops) - 1:
+                body.append(lua.Return(self.compare(self.comparison(node, left, op, right))))
+                break
+            right = self.bind_operand(right, body)
+            test = self.compare(self.comparison(node, left, op, right))
+            body.append(lua.If([(lua.UnOp("not", test), [lua.Return(lua.Bool(False))])]))
+            left = right
+        return lua.Call(lua.Function((), tuple(body)), ())
+
+    @staticmethod
+    def comparison(
+        node: ast.Compare, left: ast.expr, op: ast.cmpop, right: ast.expr
+    ) -> ast.Compare:
+        single = ast.Compare(left=left, ops=[op], comparators=[right])
+        return ast.copy_location(single, node)
+
+    def bind_operand(self, node: ast.expr, body: list[lua.Stat]) -> ast.expr:
+        """Bind an operand to a local of ``body``, unless it is cheap to repeat."""
+        if is_cheap(node):
+            return node
+        self._temp += 1
+        name = f"__c{self._temp}"
+        body.append(lua.Local([name], [self.expr(node)]))
+        kind = self.kind(node)
+        self.known.add(name)
+        if kind is not None:
+            self.kinds[name] = kind
+        return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+
     def membership(self, item: ast.expr, container: ast.expr, *, negate: bool) -> lua.Expr:
-        """``x in c``: one of a literal set of choices, a substring, or a runtime check."""
+        """``x in c``: one of a literal set of choices, or a test chosen by what c is."""
+        kind = self.kind(container)
         if isinstance(container, ast.List | ast.Tuple | ast.Set) and not any(
             isinstance(e, ast.Starred) for e in container.elts
         ):
@@ -142,16 +197,23 @@ class ExpressionCompiler(ScopeCompiler):
                     result = lua.BinOp(join, result, lua.BinOp(op, needle, self.expr(element)))
                 return result
             haystack: lua.Expr = lua.Table(array=tuple(self.expr(e) for e in container.elts))
-        elif self.kind(container) == "str":
+            helper = "__inlist"
+        elif kind == "str":
             find = lua.Call(
                 lua.Name("string.find"),
                 (self.expr(container), self.expr(item), lua.Num(1), lua.Bool(True)),
             )
             return lua.BinOp("==" if negate else "~=", find, lua.Nil())
+        elif kind == "dict":
+            lookup = lua.Index(self.expr(container), self.expr(item))
+            return lua.BinOp("==" if negate else "~=", lookup, lua.Nil())
         else:
             haystack = self.expr(container)
-        self.helpers.add("__contains")
-        check: lua.Expr = lua.Call(lua.Name("__contains"), (haystack, self.expr(item)))
+            # A table only known at runtime is told to be a list or a dict by
+            # its keys, in the helper.
+            helper = "__inlist" if kind == "list" else "__contains"
+        self.helpers.add(helper)
+        check: lua.Expr = lua.Call(lua.Name(helper), (haystack, self.expr(item)))
         return lua.UnOp("not", check) if negate else check
 
     def none_check(self, operand: lua.Expr, *, negate: bool) -> lua.Expr:
@@ -216,7 +278,7 @@ class ExpressionCompiler(ScopeCompiler):
                 conversion = "g"
             else:
                 kind = self.kind(value.value)
-                if width and kind is None:
+                if width and kind not in {"str", "num"}:
                     self.fail(
                         value,
                         "a width without a type needs to know if the value is a string",
@@ -231,17 +293,21 @@ class ExpressionCompiler(ScopeCompiler):
         return f"%{flags}{width}{'.' + precision if precision else ''}{conversion}"
 
     def subscript(self, node: ast.Subscript) -> lua.Expr:
+        container = self.kind(node.value)
         if isinstance(node.slice, ast.Slice):
-            return self.slice(node, node.slice)
+            return self.slice(node, node.slice, container)
+        if container == "dict":
+            # A dict key is used as it is, a number included.
+            return lua.Index(self.expr(node.value), self.expr(node.slice))
         position = literal_int(node.slice)
 
-        if self.kind(node.value) == "str":
+        if container == "str":
             # A Lua string cannot be indexed; one character is a substring.
             # string.sub counts back from the end for a negative position.
             at: lua.Expr = (
                 lua.Num(position)
                 if position is not None and position < 0
-                else self.index(node.slice)
+                else self.index(node.slice, container)
             )
             return lua.Call(lua.Name("string.sub"), (self.expr(node.value), at, at))
 
@@ -256,20 +322,24 @@ class ExpressionCompiler(ScopeCompiler):
             last: lua.Expr = lua.UnOp("#", obj)
             # xs[-1] is xs[#xs], and xs[-k] is xs[#xs - k + 1].
             return lua.Index(obj, last if position == -1 else offset(last, position + 1))
-        return lua.Index(self.expr(node.value), self.index(node.slice))
+        return lua.Index(self.expr(node.value), self.index(node.slice, container))
 
-    def slice(self, node: ast.Subscript, part: ast.Slice) -> lua.Expr:
-        """``v[i:j]``, for a string or a list, through the __slice helper."""
-        if part.step is not None and literal_int(part.step) != 1:
-            self.fail(
-                part,
-                "a slice with a step is not supported",
-                hint="Loop over range(start, stop, step) and collect what you need.",
-            )
+    def slice(self, node: ast.Subscript, part: ast.Slice, container: str | None) -> lua.Expr:
+        """``v[i:j]`` and ``v[i:j:k]``, for a string or a list, through a helper."""
+        if container == "dict":
+            self.fail(node, "a dict cannot be sliced")
         lower = lua.Nil() if part.lower is None else self.expr(part.lower)
         upper = lua.Nil() if part.upper is None else self.expr(part.upper)
-        self.helpers.add("__slice")
-        return lua.Call(lua.Name("__slice"), (self.expr(node.value), lower, upper))
+        step = None if part.step is None else literal_int(part.step)
+        if part.step is None or step == 1:
+            self.helpers.add("__slice")
+            return lua.Call(lua.Name("__slice"), (self.expr(node.value), lower, upper))
+        if step == 0:
+            self.fail(part.step, "a slice step cannot be zero")
+        self.helpers.add("__slicestep")
+        return lua.Call(
+            lua.Name("__slicestep"), (self.expr(node.value), lower, upper, self.expr(part.step))
+        )
 
     def subscript_target(self, node: ast.Subscript) -> lua.Expr:
         target = self.subscript(node)
@@ -281,13 +351,16 @@ class ExpressionCompiler(ScopeCompiler):
             )
         return target
 
-    def index(self, node: ast.expr) -> lua.Expr:
+    def index(self, node: ast.expr, container: str | None = None) -> lua.Expr:
         """Translate a Python subscript to a Lua one.
 
         A position counts from 0 in Python and from 1 in Lua, while a dict key
-        is used as it is. A literal says which it is; so does a value whose type
-        is known. Anything else is decided at runtime, by the __key helper.
+        is used as it is. What is being subscripted says which, when that is
+        known. Otherwise a literal says, or a value whose type is known, and
+        anything else is decided at runtime, by the __key helper.
         """
+        if container == "dict":
+            return self.expr(node)
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return lua.Str(node.value)
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
@@ -307,7 +380,7 @@ class ExpressionCompiler(ScopeCompiler):
         kind = self.kind(node)
         if kind == "str":
             return self.expr(node)
-        if kind == "num":
+        if kind == "num" or container in {"list", "str"}:
             return lua.BinOp("+", self.expr(node), lua.Num(1))
         self.helpers.add("__key")
         return lua.Call(lua.Name("__key"), (self.expr(node),))
@@ -349,7 +422,9 @@ class ExpressionCompiler(ScopeCompiler):
         """
         test = self.condition(node.test)
         then, otherwise = self.expr(node.body), self.expr(node.orelse)
-        if isinstance(then, lua.Num | lua.Str | lua.Bytes | lua.Table) or then == lua.Bool(True):
+        if isinstance(then, lua.Num | lua.Str | lua.Bytes | lua.Table | lua.Function) or then == (
+            lua.Bool(True)
+        ):
             return lua.BinOp("or", lua.BinOp("and", test, then), otherwise)
         body = (lua.If([(test, [lua.Return(then)])]), lua.Return(otherwise))
         return lua.Call(lua.Function((), body), ())

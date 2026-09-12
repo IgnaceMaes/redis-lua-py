@@ -123,6 +123,8 @@ class Compiler(ControlFlowCompiler):
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in self.known
         ):
+            if self.kind(node.func.value) == "dict":
+                self.fail(node, "a dict has no append() method")
             if len(node.args) != 1:
                 self.fail(node, "append() takes exactly one argument")
             target = self.expr(node.func.value)
@@ -141,6 +143,10 @@ class Compiler(ControlFlowCompiler):
                 if not lua.is_identifier(name):
                     self.fail(target, f"{name!r} is a reserved word in Lua")
                 if not augmented and id(node) in self.simple_assigns:
+                    if isinstance(rhs, lua.Function):
+                        # A local function, unlike a local holding one, is in
+                        # scope in its own body, so a named lambda can recurse.
+                        return [lua.LocalFunction(name, list(rhs.params), list(rhs.body))]
                     return [lua.Local([name], [rhs])]
                 return [lua.Assign([lua.Name(name)], [rhs])]
             case ast.Subscript():
@@ -186,12 +192,7 @@ class Compiler(ControlFlowCompiler):
         return [*prefix, lua.Assign(targets, values)]
 
     def nested_function(self, node: ast.FunctionDef) -> lua.Stat:
-        """Compile a helper defined in the body to a Lua local function.
-
-        It gets a compiler of its own, so that the names it assigns are local
-        to it as they would be in Python, while it can still read the names of
-        the script around it, call other helpers, and call itself.
-        """
+        """Compile a helper defined in the body to a Lua local function."""
         if not any(stmt is node for stmt in self.func.body):
             self.fail(
                 node,
@@ -213,6 +214,49 @@ class Compiler(ControlFlowCompiler):
                 self.fail(node, f"{name!r} is a reserved word in Lua")
         params = [a.arg for a in sig.args]
 
+        child = self.scope_of(node, params, name=node.name)
+        child.collect_assigned()
+        body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+        statements = child.block(body)
+        if child.hoisted:
+            statements.insert(0, lua.Local(sorted(set(child.hoisted)), []))
+        self.close_over(node, child)
+        return lua.LocalFunction(node.name, params, statements)
+
+    def lambda_expr(self, node: ast.Lambda) -> lua.Expr:
+        """``lambda x: ...``, as an anonymous Lua function returning the expression.
+
+        Lua closes over a name by reference, as Python does, so a lambda sees
+        what the names around it hold when it runs, not when it was written.
+        """
+        sig = node.args
+        if sig.vararg or sig.kwarg or sig.posonlyargs or sig.kwonlyargs or sig.defaults:
+            self.fail(
+                node,
+                "a lambda takes plain positional parameters only",
+                hint="Calls inside a script are positional, so defaults, *args and "
+                "keyword-only parameters have nothing to bind to.",
+            )
+        params = [a.arg for a in sig.args]
+        for name in params:
+            if not lua.is_identifier(name):
+                self.fail(node, f"{name!r} is a reserved word in Lua")
+        # A compiler holds a function: here, one that returns the lambda's body.
+        function = ast.FunctionDef(
+            name="lambda", args=sig, body=[ast.Return(node.body)], decorator_list=[]
+        )
+        child = self.scope_of(ast.copy_location(function, node), params, name=None)
+        value = child.expr(node.body)
+        self.close_over(node, child)
+        return lua.Function(tuple(params), (lua.Return(value),))
+
+    def scope_of(self, node: ast.FunctionDef, params: list[str], *, name: str | None) -> Compiler:
+        """A compiler of its own for a function defined in the body.
+
+        The names the function assigns are then local to it, as they would be
+        in Python, while it can still read the names of the script around it,
+        call the script's helpers, and call itself.
+        """
         child = type(self)(
             node,
             filename=self.filename,
@@ -220,36 +264,54 @@ class Compiler(ControlFlowCompiler):
             lines=self.lines,
             globalns=self.globalns,
         )
+        own = set() if name is None else {name}
         child.params = params
-        child.known = self.known | set(params) | {node.name}
-        child.local_functions = self.local_functions | {node.name}
-        # What the script's names hold is known inside the helper too, except
+        child.known = self.known | set(params) | own
+        child.local_functions = self.local_functions | own
+        child.callable_params = self.callable_params | set(params)
+        # What the script's names hold is known inside the function too, except
         # for its parameters, which say nothing about their type.
         child.kinds = {k: v for k, v in self.kinds.items() if k not in params}
         child.values = {k: list(v) for k, v in self.values.items() if k not in params}
         child.opaque = self.opaque - set(params)
         child._temp = self._temp
-        child.collect_assigned()
+        return child
 
-        body = node.body[1:] if ast.get_docstring(node) is not None else node.body
-        statements = child.block(body)
-        if child.hoisted:
-            statements.insert(0, lua.Local(sorted(set(child.hoisted)), []))
-
+    def close_over(self, node: ast.FunctionDef | ast.Lambda, child: Compiler) -> None:
+        """Take in what a function defined in the body needs from the script around it."""
         self._temp = child._temp
         self.helpers |= child.helpers
 
-        # Python resolves a free name when the helper runs; Lua binds it where
-        # the function is written. A script name first assigned after the def
-        # is declared up front instead, so the helper sees it too.
-        reads = {
-            n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        bound = {
+            arg.arg
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.FunctionDef | ast.Lambda)
+            for arg in inner.args.args
         }
-        for name in reads - set(params) - child.assigned:
+        free = [
+            read
+            for read in ast.walk(node)
+            if isinstance(read, ast.Name)
+            and isinstance(read.ctx, ast.Load)
+            and read.id not in bound
+            and read.id not in child.assigned
+        ]
+        for read in free:
+            if read.id in self.loop_targets and read.id not in child.loop_targets:
+                self.fail(
+                    read,
+                    f"a function defined in the body cannot read the loop variable {read.id!r}",
+                    hint="Lua gives each step of a loop a variable of its own, which a "
+                    "function keeps, and which does not exist after the loop; Python has "
+                    "one for the whole script. Pass the value in as a parameter.",
+                )
+
+        # Python resolves a free name when the function runs; Lua binds it where
+        # the function is written. A script name first assigned after the
+        # function is declared up front instead, so the function sees it too.
+        for name in sorted({read.id for read in free}):
             first = self.first_assignment.get(name)
-            if first is None or id(first) not in self.simple_assigns or first.lineno < node.lineno:
+            if first is None or id(first) not in self.simple_assigns or first.lineno <= node.lineno:
                 continue
             self.simple_assigns.discard(id(first))
             self.hoisted.extend(self.first_names[id(first)])
-
-        return lua.LocalFunction(node.name, params, statements)

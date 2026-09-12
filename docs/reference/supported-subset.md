@@ -13,12 +13,14 @@ language with a faithful Lua meaning is accepted.
   `assert`.
 - **Loops:** `for ... in` over a table, `range()`, `enumerate()`, or a dict's
   `.items()`, `.keys()` and `.values()`, binding a name or a tuple of names.
-- **Helper functions** defined with `def` at the top level of the body. They
-  can call each other and themselves.
-- **Expressions:** comparisons; arithmetic; `in` and `not in`; `and`/`or`, and
-  `a if c else b`, both as values; list and dict literals.
-- **Subscripts:** indices, dict keys, negative literal indices on a name, and
-  slices without a step, of lists and strings.
+- **Helper functions** defined with `def` at the top level of the body, and
+  `lambda` wherever an expression can go. They can call each other and
+  themselves, and be passed to a helper that calls them.
+- **Expressions:** comparisons, chained ones such as `0 < n <= limit`
+  included; arithmetic; `in` and `not in`; `and`/`or`, and `a if c else b`,
+  both as values; list and dict literals.
+- **Subscripts:** indices, dict keys of any type, negative literal indices on
+  a name, and slices of lists and strings, with a step or without.
 - **Strings:** f-strings with format specs; `%` formatting; `+` and `*` on a
   string; `str.join`, `upper`, `lower`, `strip`, `lstrip`, `rstrip`,
   `startswith`, `endswith`, `find`, `split` and `replace`.
@@ -37,11 +39,11 @@ Everything else raises
 with a caret under the line at fault:
 
 ```
-chained comparisons are not supported
+math.log() with a base is not supported
   File "/srv/app/limits.py", line 12
-    if 0 < n < limit:
-       ^
-  hint: Split 'a < b < c' into 'a < b and b < c'.
+    buckets = math.log(n, 2)
+              ^
+  hint: Lua 5.1's math.log takes no base; divide by math.log(base) instead.
 ```
 
 Failing at import, loudly, is deliberate. A body that looks like Python but is

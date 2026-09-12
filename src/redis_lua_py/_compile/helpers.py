@@ -59,18 +59,72 @@ local function __slice(v, i, j)
   for k = i + 1, j do out[#out + 1] = v[k] end
   return out
 end""",
+    "__slicestep": """\
+-- Python's v[i:j:k], for a string or a list: every k-th item from i up to j,
+-- or down to it when k is negative, with the bounds clamped as Python does.
+local function __slicestep(v, i, j, k)
+  if k == 0 then error('slice step cannot be zero', 0) end
+  local n = #v
+  -- Walking down, -1 stands for the position before the first item.
+  local low, high = 0, n
+  if k < 0 then low, high = -1, n - 1 end
+  local function bound(b, default)
+    if b == nil then return default end
+    if b < 0 then b = b + n end
+    return math.min(math.max(b, low), high)
+  end
+  i = bound(i, k > 0 and 0 or n - 1)
+  j = bound(j, k > 0 and n or -1)
+  local stop = k > 0 and j - 1 or j + 1
+  local out = {}
+  if type(v) == 'string' then
+    for p = i, stop, k do out[#out + 1] = string.sub(v, p + 1, p + 1) end
+    return table.concat(out)
+  end
+  for p = i, stop, k do out[#out + 1] = v[p + 1] end
+  return out
+end""",
     "__contains": """\
--- Python's `x in c`: a substring of a string, an element of a list, or a key
--- of a dict. A table with an array part is taken to be a list.
+-- Python's `x in c`, where c is only known at runtime: a substring of a string,
+-- and otherwise an element of a list or a key of a dict. Lua has one table for
+-- both, so a table with any key besides the positions 1 to #c is a dict.
 local function __contains(c, x)
   if type(c) == 'string' then return string.find(c, x, 1, true) ~= nil end
-  if #c > 0 then
-    for i = 1, #c do
-      if c[i] == x then return true end
-    end
-    return false
+  local n, found = #c, false
+  for k, v in pairs(c) do
+    if type(k) ~= 'number' or k < 1 or k > n or k % 1 ~= 0 then return c[x] ~= nil end
+    if v == x then found = true end
   end
-  return c[x] ~= nil
+  return found
+end""",
+    "__inlist": """\
+-- Python's `x in xs`, for a list.
+local function __inlist(xs, x)
+  for i = 1, #xs do
+    if xs[i] == x then return true end
+  end
+  return false
+end""",
+    "__dictlen": """\
+-- len() of a dict, whose keys Lua's # does not count.
+local function __dictlen(d)
+  local n = 0
+  for _ in pairs(d) do n = n + 1 end
+  return n
+end""",
+    "__add": """\
+-- Python's a + b, where neither side is known to be a number or a string: two
+-- strings are joined, two lists are joined into a new one, and the rest added.
+local function __add(a, b)
+  local ta, tb = type(a), type(b)
+  if ta == 'string' and tb == 'string' then return a .. b end
+  if ta == 'table' and tb == 'table' then
+    local out, n = {}, #a
+    for i = 1, n do out[i] = a[i] end
+    for i = 1, #b do out[n + i] = b[i] end
+    return out
+  end
+  return a + b
 end""",
     "__startswith": """\
 local function __startswith(s, prefix)

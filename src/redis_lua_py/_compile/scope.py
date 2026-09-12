@@ -53,6 +53,7 @@ class ScopeCompiler(CompilerBase):
                 # Loop targets get Lua's own loop scope; only record them so
                 # that reads of the name resolve.
                 self.known.update(target_names(node.target))
+                self.loop_targets.update(target_names(node.target))
             elif isinstance(node, ast.FunctionDef):
                 self.known.add(node.name)
                 self.local_functions.add(node.name)
@@ -110,6 +111,7 @@ class ScopeCompiler(CompilerBase):
                 # KEYS and ARGV have no names, only positions, so a list can
                 # only take whatever is left after the fixed parameters: one
                 # list of keys, and one list of arguments.
+                self.kinds[name] = "list"
                 if self._is_key(item):
                     if self.variadic_key is not None:
                         self.fail(arg, "only one list[Key] parameter is supported")

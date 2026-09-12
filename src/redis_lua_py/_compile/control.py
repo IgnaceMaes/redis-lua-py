@@ -215,7 +215,10 @@ class ControlFlowCompiler(CallCompiler):
             and not it.args
             and not self.is_namespace(it.func.value)
         ):
-            return self.pairs_loop(node, names, it.func)
+            return self.pairs_loop(node, names, it.func.value, it.func.attr)
+        if self.kind(it) == "dict":
+            # Iterating a dict walks its keys, as .keys() does.
+            return self.pairs_loop(node, names, it, "keys")
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
             if len(names) != 1:
                 self.fail(node.target, "range() yields one value per step")
@@ -270,21 +273,21 @@ class ControlFlowCompiler(CallCompiler):
         seq = f"__seq{self._temp}"
         return [lua.Local([seq], [iterable])], lua.Name(seq), idx
 
-    def pairs_loop(self, node: ast.For, names: list[str], method: ast.Attribute) -> lua.Stat:
+    def pairs_loop(self, node: ast.For, names: list[str], table: ast.expr, method: str) -> lua.Stat:
         """``d.items()``, ``d.keys()`` and ``d.values()``, over Lua's pairs().
 
         pairs() visits entries in no particular order, as does Lua itself;
         sort the result if the order reaches the caller.
         """
-        wanted = 2 if method.attr == "items" else 1
+        wanted = 2 if method == "items" else 1
         if len(names) != wanted:
             shape = "a key and a value" if wanted == 2 else "one value"
-            self.fail(node.target, f"{method.attr}() yields {shape} per step")
-        table = self.expr(method.value)
-        if method.attr == "values":
+            self.fail(node.target, f"{method}() yields {shape} per step")
+        iterable = self.expr(table)
+        if method == "values":
             self._temp += 1
             names = [f"__k{self._temp}", names[0]]
-        iterator = lua.Call(lua.Name("pairs"), (table,))
+        iterator = lua.Call(lua.Name("pairs"), (iterable,))
         return lua.GenericFor(names, iterator, self.loop_body(node.body))
 
     def enumerate_loop(self, node: ast.For, names: list[str], call: ast.Call) -> lua.Stat:

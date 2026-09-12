@@ -45,7 +45,18 @@ class TestKeysAndPositions:
         assert "[wanted]" in field.lua
         assert field(client, doc='{"count": 4}') == 4
 
-    def test_a_number_only_known_at_runtime_is_still_a_position(self, client: Any) -> None:
+    def test_a_value_only_known_at_runtime_is_decided_there(self, client: Any) -> None:
+        @script
+        def pick(k: Key, at: Key) -> bytes:
+            items = redis.lrange(k, 0, -1)
+            return items[redis.llen(at)]
+
+        client.rpush("l", "a", "b", "c")
+        client.rpush("m", "x")
+        assert "__key(redis.call('LLEN', at))" in pick.lua
+        assert pick(client, k="l", at="m") == b"b"
+
+    def test_arithmetic_is_known_to_give_a_number(self, client: Any) -> None:
         @script
         def last(k: Key) -> bytes:
             items = redis.lrange(k, 0, -1)
@@ -53,7 +64,7 @@ class TestKeysAndPositions:
             return items[n - 1]
 
         client.rpush("l", "a", "b", "c")
-        assert "__key(n - 1)" in last.lua
+        assert "items[n - 1 + 1]" in last.lua
         assert last(client, k="l") == b"c"
 
     def test_a_counter_is_known_to_be_a_number(self) -> None:
@@ -103,6 +114,31 @@ class TestSlicing:
 
         assert parts(client, word="redis") == [b"red", b"is", b"is", b"edi", b""]
 
+    @pytest.mark.parametrize("step", [2, 3, -1, -2])
+    def test_a_step_slices_as_python_does(self, client: Any, step: int) -> None:
+        @script
+        def stepped(word: str, lo: str, hi: str, k: int, letters: list[str]) -> list[bytes]:
+            i = None if lo == "" else int(lo)
+            j = None if hi == "" else int(hi)
+            return [word[i:j:k], ",".join(letters[i:j:k])]
+
+        word = "abcdefg"
+        for lo in ["", "0", "2", "-3", "9", "-9"]:
+            for hi in ["", "0", "5", "-2", "9", "-9"]:
+                i = None if lo == "" else int(lo)
+                j = None if hi == "" else int(hi)
+                expected = [word[i:j:step].encode(), ",".join(word[i:j:step]).encode()]
+                got = stepped(client, word=word, lo=lo, hi=hi, k=step, letters=list(word))
+                assert got == expected, (lo, hi, step)
+
+    def test_reversing_with_a_literal_step(self, client: Any) -> None:
+        @script
+        def backwards(word: str, k: Key) -> list[Any]:
+            return [word[::-1], redis.lrange(k, 0, -1)[::-1]]
+
+        client.rpush("l", "x", "y")
+        assert backwards(client, word="abc", k="l") == [b"cba", [b"y", b"x"]]
+
 
 class TestMembership:
     def test_in_a_literal_tuple(self, client: Any) -> None:
@@ -146,6 +182,70 @@ class TestMembership:
 
         assert has(client, doc='{"a": 1}', key="a") == [1, 0]
         assert has(client, doc='{"a": 1}', key="b") == [0, 1]
+
+    def test_a_dict_is_looked_up_by_key_a_number_included(self, client: Any) -> None:
+        @script
+        def lookup(n: int) -> list[int]:
+            names = {1: "one", 2: "two"}
+            return [1 if n in names else 0, 1 if "one" in names else 0]
+
+        assert "names[n] ~= nil" in lookup.lua
+        assert lookup(client, n=1) == [1, 0]
+        assert lookup(client, n=3) == [0, 0]
+
+    def test_a_list_is_searched(self, client: Any) -> None:
+        @script
+        def has(wanted: str, keys: list[Key]) -> int:
+            return 1 if wanted in keys else 0
+
+        assert "__inlist(keys, wanted)" in has.lua
+        assert has(client, wanted="b", keys=["a", "b"]) == 1
+        assert has(client, wanted="c", keys=["a", "b"]) == 0
+
+    def test_a_table_only_known_at_runtime_is_a_dict_if_a_key_is_not_a_position(
+        self, client: Any
+    ) -> None:
+        @script
+        def probe(x: str) -> list[int]:
+            def has(table, item):
+                return 1 if item in table else 0
+
+            return [has({1: "a", "b": 2}, x), has(["a", "b"], x)]
+
+        assert probe(client, x="b") == [1, 1]
+        assert probe(client, x="a") == [0, 1]
+
+
+class TestDictKeys:
+    def test_a_number_key_is_not_a_position(self, client: Any) -> None:
+        @script
+        def table(n: int) -> list[Any]:
+            counts = {}
+            counts[0] = "zero"
+            counts[n] = "n"
+            return [counts[0], counts.get(n), len(counts)]
+
+        assert "counts[0] = 'zero'" in table.lua
+        assert table(client, n=2) == [b"zero", b"n", 2]
+
+    def test_iterating_a_dict_walks_its_keys(self, client: Any) -> None:
+        @script
+        def weighted() -> int:
+            weights = {1: 10, 2: 20}
+            total = 0
+            for k in weights:
+                total += k * weights[k]
+            return total
+
+        assert weighted(client) == 50
+
+    def test_list_methods_on_a_dict_are_refused(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match=r"dict\.pop\(\) is not supported"):
+
+            @script
+            def s() -> int:
+                d = {"a": 1}
+                return d.pop("a")
 
 
 class TestStringMethods:
@@ -232,12 +332,20 @@ class TestFormatting:
 
 
 class TestRefusals:
-    def test_a_slice_with_a_step(self) -> None:
-        with pytest.raises(UnsupportedSyntax, match="with a step"):
+    def test_a_slice_step_of_zero(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match="step cannot be zero"):
 
             @script
             def s(word: str) -> str:
-                return word[::2]
+                return word[::0]
+
+    def test_slicing_a_dict(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match="cannot be sliced"):
+
+            @script
+            def s() -> int:
+                d = {"a": 1}
+                return d[0:1]
 
     def test_a_negative_index_on_an_expression(self) -> None:
         with pytest.raises(UnsupportedSyntax, match="needs a name"):

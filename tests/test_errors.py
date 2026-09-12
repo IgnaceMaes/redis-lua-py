@@ -16,15 +16,6 @@ def test_with_is_rejected() -> None:
                 return 1
 
 
-def test_lambda_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="Lambda expressions"):
-
-        @script
-        def s(a: int) -> int:
-            double = lambda x: x * 2  # noqa: E731
-            return double(a)
-
-
 def test_starred_unpacking_is_rejected() -> None:
     with pytest.raises(UnsupportedSyntax, match="only names and subscripts"):
 
@@ -49,25 +40,6 @@ def test_negative_index_on_an_expression_is_rejected() -> None:
         @script
         def s(k: Key) -> str:
             return redis.lrange(k, 0, -1)[-1]
-
-
-def test_chained_comparison_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="chained comparisons"):
-
-        @script
-        def s(a: int) -> int:
-            if 1 < a < 5:
-                return 1
-            return 0
-
-
-def test_slicing_with_a_step_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="with a step"):
-
-        @script
-        def s(k: Key) -> list[str]:
-            items = redis.lrange(k, 0, -1)
-            return items[::2]
 
 
 def test_bit_shift_is_rejected() -> None:
@@ -169,13 +141,12 @@ def test_error_names_the_line_and_marks_the_column() -> None:
     with pytest.raises(UnsupportedSyntax) as info:
 
         @script
-        def s(n: int) -> int:
-            double = lambda x: x * 2  # noqa: E731
-            return double(n)
+        def s(a: int, b: int) -> int:
+            return a << b
 
     rendered = str(info.value)
     assert "test_errors.py" in rendered
-    assert "lambda" in rendered
+    assert "a << b" in rendered
     assert "^" in rendered
     assert info.value.lineno > 0
 
@@ -184,10 +155,8 @@ def test_error_carries_a_hint() -> None:
     with pytest.raises(UnsupportedSyntax) as info:
 
         @script
-        def s(a: int) -> int:
-            if 1 < a < 5:
-                return 1
-            return 0
+        def s(k: Key, values: list[str]) -> int:
+            return redis.rpush(k, *values, "end")
 
     assert info.value.hint is not None
-    assert "a < b and b < c" in info.value.hint
+    assert "unpack()" in info.value.hint
