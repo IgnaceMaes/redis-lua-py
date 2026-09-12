@@ -43,13 +43,12 @@ def test_closure_variable_is_rejected() -> None:
             return outside
 
 
-def test_negative_index_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="negative indexing"):
+def test_negative_index_on_an_expression_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="needs a name"):
 
         @script
         def s(k: Key) -> str:
-            items = redis.lrange(k, 0, -1)
-            return items[-1]
+            return redis.lrange(k, 0, -1)[-1]
 
 
 def test_chained_comparison_is_rejected() -> None:
@@ -62,24 +61,21 @@ def test_chained_comparison_is_rejected() -> None:
             return 0
 
 
-def test_slicing_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="slicing"):
+def test_slicing_with_a_step_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="with a step"):
 
         @script
         def s(k: Key) -> list[str]:
             items = redis.lrange(k, 0, -1)
-            return items[1:3]
+            return items[::2]
 
 
-def test_in_operator_is_rejected() -> None:
-    with pytest.raises(UnsupportedSyntax, match="no 'in' operator"):
+def test_bit_shift_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="LShift operator"):
 
         @script
-        def s(k: Key) -> int:
-            items = redis.lrange(k, 0, -1)
-            if "x" in items:
-                return 1
-            return 0
+        def s(a: int, b: int) -> int:
+            return a << b
 
 
 def test_except_with_a_type_is_rejected() -> None:
@@ -158,12 +154,15 @@ def test_raise_from_is_rejected() -> None:
             raise RuntimeError("wrapped") from None
 
 
-def test_string_plus_is_rejected_with_a_pointer_to_fstrings() -> None:
-    with pytest.raises(UnsupportedSyntax, match="f-string"):
+def test_fstring_alignment_is_rejected_with_a_hint() -> None:
+    with pytest.raises(UnsupportedSyntax, match=r"no string\.format counterpart") as info:
 
         @script
         def s(a: str) -> str:
-            return "prefix-" + a
+            return f"{a:^20}"
+
+    assert info.value.hint is not None
+    assert "alignment" in info.value.hint
 
 
 def test_error_names_the_line_and_marks_the_column() -> None:

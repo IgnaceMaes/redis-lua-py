@@ -20,8 +20,25 @@ plainly what they mean.
 ## Indexing is closed
 
 Lua tables are 1-based. `items[0]` compiles to `items[1]`. Write Python indices
-and let the compiler shift them. Negative indices are refused, because Lua has
-no equivalent.
+and let the compiler shift them.
+
+A dict key must not be shifted, and Lua cannot tell a list from a dict. So the
+compiler looks at the subscript:
+
+- a string literal, or a value known to be a string, is used as it is;
+- an integer literal, or a value known to be a number, is shifted by one;
+- anything else goes through a small `__key` helper, which shifts numbers and
+  leaves everything else alone, at runtime.
+
+A value is known to be a string or a number from its annotation, a literal,
+the builtin or method that produced it, a `range()` or `enumerate()` loop
+variable, or every assignment to the name agreeing. Integer keys in a dict
+are treated as positions; use string keys.
+
+`items[-1]` compiles to `items[#items]`, which needs a name to count back from.
+Indexing a string gives a one-character string, as it does in Python, through
+`string.sub`. Slices, `v[i:j]`, work on lists and strings, with negative and
+missing bounds; a slice with a step is refused.
 
 ## Assignment scope is closed
 
@@ -29,9 +46,27 @@ Python scopes a name to the whole function; Lua's `local` scopes it to the
 enclosing block. A name assigned inside an `if` and read after it is hoisted to
 the top of the script, so it does not silently read back `nil`.
 
-## `+` is arithmetic, not concatenation
+## Strings are closed
 
-Use an f-string, which compiles to Lua's `..`.
+Lua's `+` is only arithmetic. It will add `"1" + "2"` to `3`. So `+`
+compiles to Lua's `..` wherever either side is known to be a string, as
+above, and `"=" * n` to `string.rep`. Where neither side is known, `+` stays
+arithmetic; use an f-string to concatenate two values of unknown type.
+
+The string methods compile to Lua's string library, and to small helpers where
+Python means something Lua's own functions do not:
+
+- **`find`, `replace`, `split`, `startswith` and `endswith`** take a plain
+  substring. `string.find` would read `.` as a pattern.
+- **`strip`, `lstrip` and `rstrip`** strip whitespace, and take no argument.
+- **`x in s`** is a substring test on a string. On a list it is an element test;
+  on a dict it is a key test.
+
+`"%s: %d" % (name, n)` and f-string format specs such as `{price:8.2f}` compile
+to `string.format`. Width, precision, sign and zero padding are supported. A
+string aligns left and a number right, as in Python, so a width with no type,
+on a value of unknown type, asks for one. Fill characters, explicit alignment
+and grouping are refused.
 
 ## `and`, `or` and conditional expressions are closed
 

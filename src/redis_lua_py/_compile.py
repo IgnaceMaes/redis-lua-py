@@ -12,6 +12,7 @@ import ast
 import difflib
 import inspect
 import math
+import re
 import textwrap
 import warnings
 from collections.abc import Callable, Iterator
@@ -118,6 +119,8 @@ _BUILTIN_FUNCS: dict[str, str] = {
     "abs": "math.abs",
     "min": "math.min",
     "max": "math.max",
+    "ord": "string.byte",
+    "chr": "string.char",
 }
 
 # Functions of the math module with a Lua counterpart of the same meaning.
@@ -137,9 +140,129 @@ _MATH_FUNCS: dict[str, str] = {
 _MATH_BY_OBJECT: dict[object, str] = {getattr(math, name): name for name in [*_MATH_FUNCS, "log"]}
 
 _METHOD_HINT = (
-    "Only the redis and cjson namespaces, list.append(), list.insert(), list.pop() "
-    "and str.join() are available."
+    "Available: the redis and cjson namespaces; list append, insert and pop; str join, "
+    "upper, lower, strip, lstrip, rstrip, startswith, endswith, find, split and replace; "
+    "and dict get."
 )
+
+# Methods of str (and dict.get) that compile, wherever the receiver is not a
+# namespace. None of these names is a list method, so a receiver of unknown
+# type is not ambiguous.
+_STRING_METHODS = frozenset(
+    {
+        "upper",
+        "lower",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "startswith",
+        "endswith",
+        "find",
+        "split",
+        "replace",
+        "get",
+    }
+)
+
+# Runtime helpers, emitted only when a script uses them, in this order.
+_HELPERS: dict[str, str] = {
+    "__key": """\
+-- A subscript only known at runtime: a number is a 0-based position, and
+-- anything else is a dict key, used as it is.
+local function __key(k)
+  if type(k) == 'number' then return k + 1 end
+  return k
+end""",
+    "__slice": """\
+-- Python's v[i:j], for a string or a list: bounds count from 0, a negative
+-- bound counts back from the end, and a missing one goes all the way.
+local function __slice(v, i, j)
+  local n = #v
+  if i == nil then i = 0 elseif i < 0 then i = math.max(n + i, 0) elseif i > n then i = n end
+  if j == nil then j = n elseif j < 0 then j = math.max(n + j, 0) elseif j > n then j = n end
+  if type(v) == 'string' then return string.sub(v, i + 1, j) end
+  local out = {}
+  for k = i + 1, j do out[#out + 1] = v[k] end
+  return out
+end""",
+    "__contains": """\
+-- Python's `x in c`: a substring of a string, an element of a list, or a key
+-- of a dict. A table with an array part is taken to be a list.
+local function __contains(c, x)
+  if type(c) == 'string' then return string.find(c, x, 1, true) ~= nil end
+  if #c > 0 then
+    for i = 1, #c do
+      if c[i] == x then return true end
+    end
+    return false
+  end
+  return c[x] ~= nil
+end""",
+    "__startswith": """\
+local function __startswith(s, prefix)
+  return string.sub(s, 1, #prefix) == prefix
+end""",
+    "__endswith": """\
+local function __endswith(s, suffix)
+  return suffix == '' or string.sub(s, -#suffix) == suffix
+end""",
+    "__find": """\
+-- str.find: the 0-based position of a plain substring, or -1.
+local function __find(s, sub)
+  local i = string.find(s, sub, 1, true)
+  if i == nil then return -1 end
+  return i - 1
+end""",
+    "__split": """\
+-- str.split: on a plain separator, or on runs of whitespace without one.
+local function __split(s, sep)
+  local out = {}
+  if sep == nil then
+    for part in string.gmatch(s, '%S+') do out[#out + 1] = part end
+    return out
+  end
+  if sep == '' then error('empty separator', 0) end
+  local start = 1
+  while true do
+    local i, j = string.find(s, sep, start, true)
+    if i == nil then break end
+    out[#out + 1] = string.sub(s, start, i - 1)
+    start = j + 1
+  end
+  out[#out + 1] = string.sub(s, start)
+  return out
+end""",
+    "__replace": """\
+-- str.replace, of a plain substring rather than a Lua pattern.
+local function __replace(s, old, new)
+  local out = {}
+  if old == '' then
+    out[1] = new
+    for i = 1, #s do
+      out[#out + 1] = string.sub(s, i, i)
+      out[#out + 1] = new
+    end
+    return table.concat(out)
+  end
+  local start = 1
+  while true do
+    local i, j = string.find(s, old, start, true)
+    if i == nil then break end
+    out[#out + 1] = string.sub(s, start, i - 1)
+    out[#out + 1] = new
+    start = j + 1
+  end
+  out[#out + 1] = string.sub(s, start)
+  return table.concat(out)
+end""",
+    "__get": """\
+-- dict.get: the value under a key, or the default when there is none.
+local function __get(t, k, default)
+  local v = t[k]
+  if v == nil then return default end
+  return v
+end""",
+}
 
 _TRUTHY_HELPER = """\
 -- Python truthiness: 0, '', empty tables and nil are all false.
@@ -231,6 +354,15 @@ class _Compiler:
         # The names a statement assigns for the first time, by statement id.
         self.first_names: dict[int, list[str]] = {}
         self.needs_errmsg = False
+        # Runtime helpers from _HELPERS this script uses.
+        self.helpers: set[str] = set()
+        # What a parameter or loop variable is known to be: "str" or "num".
+        self.kinds: dict[str, str] = {}
+        # Every value assigned to each name, to work out what a local holds.
+        self.values: dict[str, list[ast.expr]] = {}
+        # Names bound in ways that say nothing about their type.
+        self.opaque: set[str] = set()
+        self._resolving: set[str] = set()
         # What a break or continue would leave: a loop, or None for the body of
         # a try, which runs as a function and so is out of any loop's reach.
         self.flow: list[_Loop | None] = []
@@ -342,10 +474,19 @@ class _Compiler:
                 for target in node.targets:
                     for name in _target_names(target):
                         record(name, node)
+                    if isinstance(target, ast.Name):
+                        self.values.setdefault(target.id, []).append(node.value)
+                    else:
+                        self.opaque.update(_target_names(target))
             elif isinstance(node, ast.AnnAssign | ast.AugAssign) and isinstance(
                 node.target, ast.Name
             ):
                 record(node.target.id, node)
+                if isinstance(node, ast.AugAssign):
+                    value: ast.expr = ast.BinOp(left=node.target, op=node.op, right=node.value)
+                    self.values.setdefault(node.target.id, []).append(value)
+                elif node.value is not None:
+                    self.values.setdefault(node.target.id, []).append(node.value)
             elif isinstance(node, ast.For):
                 # Loop targets get Lua's own loop scope; only record them so
                 # that reads of the name resolve.
@@ -354,8 +495,9 @@ class _Compiler:
                 self.known.add(node.name)
                 self.local_functions.add(node.name)
             elif isinstance(node, ast.ExceptHandler) and node.name is not None:
-                # Bound as a local inside the except block itself.
+                # Bound as a local inside the except block itself, to the message.
                 self.known.add(node.name)
+                self.kinds[node.name] = "str"
 
         by_id: dict[int, ast.stmt] = {}
         for name, assignments in nodes.items():
@@ -431,6 +573,9 @@ class _Compiler:
                     # is the author asking for the conversion.
                     self.numeric_args.add(name)
                     source = lua.Call(lua.Name("tonumber"), (source,))
+            kind = self._annotation_kind(arg.annotation)
+            if kind is not None:
+                self.kinds[name] = kind
             prelude.append(lua.Local([name], [source]))
 
         if self.variadic_key is not None:
@@ -470,6 +615,92 @@ class _Compiler:
 
     def _is_numeric(self, node: ast.expr | None) -> bool:
         return self._annotation_name(node) in {"int", "float"}
+
+    def _annotation_kind(self, node: ast.expr | None) -> str | None:
+        name = self._annotation_name(node)
+        if name in {"int", "float"}:
+            return "num"
+        # A bool arrives as the string "1" or "0", like every other ARGV.
+        if name in {"Key", "str", "bytes", "memoryview", "bool"}:
+            return "str"
+        return None
+
+    # ----------------------------------------------------------------- kinds
+
+    def kind(self, node: ast.expr) -> str | None:
+        """What an expression is statically known to be: "str", "num" or None.
+
+        Lua does not care, but three translations do. A subscript is shifted to
+        1-based only for a number, `+` is concatenation only for a string, and a
+        format spec aligns a string and a number differently. None means "only
+        known at runtime", and the translation then decides there, or refuses.
+        """
+        match node:
+            case ast.Constant(value=bool()):
+                return None
+            case ast.Constant(value=str() | bytes()):
+                return "str"
+            case ast.Constant(value=int() | float()):
+                return "num"
+            case ast.JoinedStr():
+                return "str"
+            case ast.Name(id=name):
+                return self.name_kind(name)
+            case ast.UnaryOp(op=ast.USub() | ast.UAdd(), operand=operand):
+                inner = self.kind(operand)
+                return inner if inner in {"num", "?"} else None
+            case ast.BinOp(op=op, left=left, right=right):
+                return _binop_kind(op, self.kind(left), self.kind(right))
+            case ast.IfExp(body=then, orelse=otherwise):
+                a, b = self.kind(then), self.kind(otherwise)
+                return a if a == b else None
+            case ast.Subscript(value=value):
+                return "str" if self.kind(value) == "str" else None
+            case ast.Call(func=ast.Name(id=name)) if name not in self.local_functions:
+                if name in {"str", "tostring", "chr"}:
+                    return "str"
+                if name in {"int", "float", "tonumber", "len", "abs", "ord"}:
+                    return "num"
+                return "num" if self.math_attr(node.func) is not None else None
+            case ast.Call(func=ast.Attribute(value=receiver, attr=attr)):
+                if self.math_attr(node.func) is not None:
+                    return "num"
+                if self.is_namespace(receiver):
+                    return None
+                if attr in {"upper", "lower", "strip", "lstrip", "rstrip", "replace", "join"}:
+                    return "str"
+                return "num" if attr == "find" else None
+            case ast.Attribute():
+                parts = _dotted_name(node)
+                if parts is None or self.namespace_kind(parts[0]) is not None:
+                    return None
+                constant: object = self.globalns.get(parts[0], _UNBOUND)
+                for attr in parts[1:]:
+                    constant = getattr(constant, attr, _UNBOUND)
+                return _value_kind(constant)
+        return None
+
+    def name_kind(self, name: str) -> str | None:
+        if name not in self.known:
+            return _value_kind(self.globalns.get(name, _UNBOUND))
+        if name in self._resolving:
+            # A name whose value depends on itself, as in `n += 1`, is whatever
+            # its other assignments make it.
+            return "?"
+        if name in self.opaque:
+            return None
+        values = self.values.get(name, [])
+        if not values:
+            return self.kinds.get(name)
+        self._resolving.add(name)
+        try:
+            found = {self.kind(value) for value in values}
+        finally:
+            self._resolving.discard(name)
+        if name in self.kinds:
+            found.add(self.kinds[name])
+        found.discard("?")
+        return found.pop() if len(found) == 1 else None
 
     @staticmethod
     def _list_item(node: ast.expr | None) -> ast.expr | None:
@@ -564,19 +795,39 @@ class _Compiler:
                 self.fail(node, f"{type(node).__name__} expressions are not supported")
 
     def binop(self, node: ast.BinOp) -> lua.Expr:
+        left_kind, right_kind = self.kind(node.left), self.kind(node.right)
+        if isinstance(node.op, ast.Add) and "str" in (left_kind, right_kind):
+            # `+` on a string concatenates in Python; Lua spells that `..`.
+            return lua.BinOp("..", self.expr(node.left), self.expr(node.right))
+        if isinstance(node.op, ast.Mod) and left_kind == "str":
+            return self.percent_format(node)
+        if isinstance(node.op, ast.Mult) and "str" in (left_kind, right_kind):
+            text, count = (node.left, node.right) if left_kind == "str" else (node.right, node.left)
+            return lua.Call(lua.Name("string.rep"), (self.expr(text), self.expr(count)))
+
         left, right = self.expr(node.left), self.expr(node.right)
         if isinstance(node.op, ast.FloorDiv):
             return lua.Call(lua.Name("math.floor"), (lua.BinOp("/", left, right),))
         op = _BIN_OPS.get(type(node.op))
         if op is None:
             self.fail(node, f"the {type(node.op).__name__} operator is not supported")
-        if op == "+" and (isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)):
-            self.fail(
-                node,
-                "'+' is arithmetic in Lua and will not concatenate strings",
-                hint="Use an f-string, which compiles to Lua's .. operator.",
-            )
         return lua.BinOp(op, left, right)
+
+    def percent_format(self, node: ast.BinOp) -> lua.Expr:
+        """``"%s: %d" % (name, n)``, which Lua's string.format reads the same way."""
+        if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+            for match in re.finditer(r"%[-+ #0]*\d*(?:\.\d+)?(.)", node.left.value):
+                if match.group(1) not in "diouxXeEfgGcs%":
+                    self.fail(
+                        node.left,
+                        f"the %{match.group(1)} conversion has no Lua counterpart",
+                        hint="string.format supports d, i, o, u, x, X, e, E, f, g, G, c and s.",
+                    )
+        if isinstance(node.right, ast.Dict):
+            self.fail(node.right, "%-formatting from a mapping is not supported")
+        values = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
+        args = (self.expr(node.left), *(self.expr(v) for v in values))
+        return lua.Call(lua.Name("string.format"), args)
 
     def compare(self, node: ast.Compare) -> lua.Expr:
         if len(node.ops) != 1:
@@ -586,6 +837,8 @@ class _Compiler:
                 hint="Split 'a < b < c' into 'a < b and b < c'.",
             )
         op_node, right_node = node.ops[0], node.comparators[0]
+        if isinstance(op_node, ast.In | ast.NotIn):
+            return self.membership(node.left, right_node, negate=isinstance(op_node, ast.NotIn))
         left = self.expr(node.left)
 
         if isinstance(op_node, ast.Is | ast.IsNot):
@@ -603,14 +856,35 @@ class _Compiler:
 
         op = _COMPARE_OPS.get(type(op_node))
         if op is None:
-            self.fail(
-                node,
-                f"the {type(op_node).__name__} comparison is not supported",
-                hint="Lua 5.1 has no 'in' operator; loop over the table instead."
-                if isinstance(op_node, ast.In | ast.NotIn)
-                else None,
-            )
+            self.fail(node, f"the {type(op_node).__name__} comparison is not supported")
         return lua.BinOp(op, left, self.expr(right_node))
+
+    def membership(self, item: ast.expr, container: ast.expr, *, negate: bool) -> lua.Expr:
+        """``x in c``: one of a literal set of choices, a substring, or a runtime check."""
+        if isinstance(container, ast.List | ast.Tuple | ast.Set) and not any(
+            isinstance(e, ast.Starred) for e in container.elts
+        ):
+            if not container.elts:
+                return lua.Bool(negate)
+            if _is_cheap(item):
+                needle = self.expr(item)
+                op, join = ("~=", "and") if negate else ("==", "or")
+                result: lua.Expr = lua.BinOp(op, needle, self.expr(container.elts[0]))
+                for element in container.elts[1:]:
+                    result = lua.BinOp(join, result, lua.BinOp(op, needle, self.expr(element)))
+                return result
+            haystack: lua.Expr = lua.Table(array=tuple(self.expr(e) for e in container.elts))
+        elif self.kind(container) == "str":
+            find = lua.Call(
+                lua.Name("string.find"),
+                (self.expr(container), self.expr(item), lua.Num(1), lua.Bool(True)),
+            )
+            return lua.BinOp("==" if negate else "~=", find, lua.Nil())
+        else:
+            haystack = self.expr(container)
+        self.helpers.add("__contains")
+        check: lua.Expr = lua.Call(lua.Name("__contains"), (haystack, self.expr(item)))
+        return lua.UnOp("not", check) if negate else check
 
     def none_check(self, operand: lua.Expr, *, negate: bool) -> lua.Expr:
         # Not `== nil`: Redis reports a missing value to Lua as false.
@@ -624,9 +898,18 @@ class _Compiler:
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 parts.append(lua.Str(value.value))
             elif isinstance(value, ast.FormattedValue):
-                if value.format_spec is not None or value.conversion not in (-1, 115):
-                    self.fail(value, "format specs and conversions are not supported in f-strings")
-                parts.append(lua.Call(lua.Name("tostring"), (self.expr(value.value),)))
+                if value.conversion not in (-1, 115):
+                    self.fail(
+                        value,
+                        "!r and !a conversions are not supported in f-strings",
+                        hint="Use !s, or no conversion; a value has no repr inside a script.",
+                    )
+                inner = self.expr(value.value)
+                if value.format_spec is None:
+                    parts.append(lua.Call(lua.Name("tostring"), (inner,)))
+                else:
+                    spec = lua.Str(self.printf_spec(value))
+                    parts.append(lua.Call(lua.Name("string.format"), (spec, inner)))
             else:  # pragma: no cover - JoinedStr only holds these two kinds
                 self.fail(value, "unsupported f-string component")
         if not parts:
@@ -638,31 +921,128 @@ class _Compiler:
             result = lua.BinOp("..", part, result)
         return result
 
+    def printf_spec(self, value: ast.FormattedValue) -> str:
+        """Turn a Python format spec into the printf directive string.format takes."""
+        spec_node = value.format_spec
+        if not (
+            isinstance(spec_node, ast.JoinedStr)
+            and all(isinstance(part, ast.Constant) for part in spec_node.values)
+        ):
+            self.fail(value, "a format spec computed at runtime is not supported")
+        spec = "".join(
+            str(part.value) for part in spec_node.values if isinstance(part, ast.Constant)
+        )
+        match = re.fullmatch(r"([-+ #0]*)(\d*)(?:\.(\d+))?([deEfgGxXos]?)", spec)
+        if match is None:
+            self.fail(
+                value,
+                f"the format spec {spec!r} has no string.format counterpart",
+                hint="Sign, zero padding, width, precision and the d, e, f, g, x, o and s "
+                "types are supported; fill, alignment and grouping are not.",
+            )
+        # Python's `-` sign is its default, where printf's `-` left-aligns.
+        flags, width, precision, conversion = match.groups()
+        flags = flags.replace("-", "")
+        if not conversion:
+            if precision:
+                conversion = "g"
+            else:
+                kind = self.kind(value.value)
+                if width and kind is None:
+                    self.fail(
+                        value,
+                        "a width without a type needs to know if the value is a string",
+                        hint="Python aligns a string left and a number right. Add a type, "
+                        "such as :10s or :10d, to say which.",
+                    )
+                conversion = "s"
+                if kind == "str":
+                    flags += "-"
+        elif conversion == "s":
+            flags += "-"
+        return f"%{flags}{width}{'.' + precision if precision else ''}{conversion}"
+
     def subscript(self, node: ast.Subscript) -> lua.Expr:
         if isinstance(node.slice, ast.Slice):
+            return self.slice(node, node.slice)
+        position = _literal_int(node.slice)
+
+        if self.kind(node.value) == "str":
+            # A Lua string cannot be indexed; one character is a substring.
+            # string.sub counts back from the end for a negative position.
+            at: lua.Expr = (
+                lua.Num(position)
+                if position is not None and position < 0
+                else self.index(node.slice)
+            )
+            return lua.Call(lua.Name("string.sub"), (self.expr(node.value), at, at))
+
+        if position is not None and position < 0:
+            if not isinstance(node.value, ast.Name):
+                self.fail(
+                    node,
+                    "a negative index needs a name to count back from",
+                    hint="Bind the table to a name first, then index that name.",
+                )
+            obj = self.expr(node.value)
+            last: lua.Expr = lua.UnOp("#", obj)
+            # xs[-1] is xs[#xs], and xs[-k] is xs[#xs - k + 1].
+            return lua.Index(obj, last if position == -1 else self._offset(last, position + 1))
+        return lua.Index(self.expr(node.value), self.index(node.slice))
+
+    def slice(self, node: ast.Subscript, part: ast.Slice) -> lua.Expr:
+        """``v[i:j]``, for a string or a list, through the __slice helper."""
+        if part.step is not None and _literal_int(part.step) != 1:
+            self.fail(
+                part,
+                "a slice with a step is not supported",
+                hint="Loop over range(start, stop, step) and collect what you need.",
+            )
+        lower = lua.Nil() if part.lower is None else self.expr(part.lower)
+        upper = lua.Nil() if part.upper is None else self.expr(part.upper)
+        self.helpers.add("__slice")
+        return lua.Call(lua.Name("__slice"), (self.expr(node.value), lower, upper))
+
+    def subscript_target(self, node: ast.Subscript) -> lua.Expr:
+        target = self.subscript(node)
+        if not isinstance(target, lua.Index):
             self.fail(
                 node,
-                "slicing is not supported",
-                hint="Loop over the table, or slice with a Redis command such as LRANGE.",
+                "this subscript cannot be assigned to",
+                hint="A slice, and a character of a string, can be read but not assigned.",
             )
-        obj = self.expr(node.value)
-        return lua.Index(obj, self.index(node.slice))
+        return target
 
     def index(self, node: ast.expr) -> lua.Expr:
-        """Translate a 0-based Python index to Lua's 1-based one."""
+        """Translate a Python subscript to a Lua one.
+
+        A position counts from 0 in Python and from 1 in Lua, while a dict key
+        is used as it is. A literal says which it is; so does a value whose type
+        is known. Anything else is decided at runtime, by the __key helper.
+        """
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return lua.Str(node.value)  # string key: no offset
+            return lua.Str(node.value)
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
             if node.value < 0:
                 self.fail(
                     node,
-                    "negative indexing is not supported",
-                    hint="Lua tables have no negative indices; use t[len(t) - 1] instead.",
+                    "a negative index is only supported when indexing a name",
+                    hint="Bind the table to a name, then write name[-1].",
                 )
             return lua.Num(node.value + 1)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            self.fail(node, "negative indexing is not supported")
-        return lua.BinOp("+", self.expr(node), lua.Num(1))
+            self.fail(
+                node,
+                "a negative index is only supported as a literal",
+                hint="Count back explicitly: t[len(t) - n].",
+            )
+        kind = self.kind(node)
+        if kind == "str":
+            return self.expr(node)
+        if kind == "num":
+            return lua.BinOp("+", self.expr(node), lua.Num(1))
+        self.helpers.add("__key")
+        return lua.Call(lua.Name("__key"), (self.expr(node),))
 
     # ----------------------------------------------------------------- calls
 
@@ -692,6 +1072,10 @@ class _Compiler:
                 recv in self.known
             ):
                 return self.list_method(node, receiver)
+            case ast.Attribute(value=receiver, attr=attr) if (
+                attr in _STRING_METHODS and not self.is_namespace(receiver)
+            ):
+                return self.string_method(node, receiver, attr, args)
             case ast.Attribute(value=ast.Name(id=recv), attr=attr):
                 return self.namespace_call(node, recv, attr, args)
             case ast.Attribute(attr=attr):
@@ -777,6 +1161,37 @@ class _Compiler:
             lua.Name("table.insert"),
             (target, self.index(node.args[0]), self.expr(node.args[1])),
         )
+
+    def string_method(
+        self, node: ast.Call, receiver: ast.expr, attr: str, args: tuple[lua.Expr, ...]
+    ) -> lua.Expr:
+        """The str methods, and dict.get, over Lua's string library and helpers."""
+        target = self.expr(receiver)
+        allowed = {"get": (1, 2), "split": (0, 1), "replace": (2,)}.get(attr)
+        if allowed is None:
+            allowed = (0,) if attr in {"upper", "lower", "strip", "lstrip", "rstrip"} else (1,)
+        if len(args) not in allowed:
+            if attr in {"strip", "lstrip", "rstrip"}:
+                self.fail(
+                    node,
+                    f"{attr}() with characters to strip is not supported",
+                    hint="Only stripping whitespace, with no argument, is supported.",
+                )
+            expected = " or ".join(str(n) for n in allowed)
+            self.fail(node, f"{attr}() takes {expected} argument(s) inside a script")
+
+        if attr in {"upper", "lower"}:
+            return lua.Call(lua.Name(f"string.{attr}"), (target,))
+        if attr in {"strip", "lstrip", "rstrip"}:
+            pattern = {"strip": "^%s*(.-)%s*$", "lstrip": "^%s*(.*)$", "rstrip": "^(.-)%s*$"}
+            return lua.Call(lua.Name("string.match"), (target, lua.Str(pattern[attr])))
+        if attr == "get":
+            self.helpers.add("__get")
+            default = args[1] if len(args) == 2 else lua.Nil()
+            return lua.Call(lua.Name("__get"), (target, args[0], default))
+        helper = f"__{attr}"
+        self.helpers.add(helper)
+        return lua.Call(lua.Name(helper), (target, *args))
 
     def boolop_value(self, node: ast.BoolOp) -> lua.Expr:
         """``a or b`` used for its value, with Python's truthiness and laziness.
@@ -1105,7 +1520,7 @@ class _Compiler:
                     return [lua.Local([name], [rhs])]
                 return [lua.Assign([lua.Name(name)], [rhs])]
             case ast.Subscript():
-                return [lua.Assign([self.subscript(target)], [rhs])]
+                return [lua.Assign([self.subscript_target(target)], [rhs])]
             case _:
                 self.fail(target, "unsupported assignment target")
 
@@ -1124,7 +1539,7 @@ class _Compiler:
                     self.fail(element, f"{element.id!r} is a reserved word in Lua")
                 targets.append(lua.Name(element.id))
             elif isinstance(element, ast.Subscript):
-                targets.append(self.subscript(element))
+                targets.append(self.subscript_target(element))
             else:
                 self.fail(element, "only names and subscripts can be unpacked into")
 
@@ -1184,6 +1599,11 @@ class _Compiler:
         child.params = params
         child.known = self.known | set(params) | {node.name}
         child.local_functions = self.local_functions | {node.name}
+        # What the script's names hold is known inside the helper too, except
+        # for its parameters, which say nothing about their type.
+        child.kinds = {k: v for k, v in self.kinds.items() if k not in params}
+        child.values = {k: list(v) for k, v in self.values.items() if k not in params}
+        child.opaque = self.opaque - set(params)
         child._temp = self._temp
         child.collect_assigned()
 
@@ -1198,6 +1618,7 @@ class _Compiler:
         self.needs_or |= child.needs_or
         self.needs_and |= child.needs_and
         self.needs_errmsg |= child.needs_errmsg
+        self.helpers |= child.helpers
 
         # Python resolves a free name when the helper runs; Lua binds it where
         # the function is written. A script name first assigned after the def
@@ -1491,6 +1912,7 @@ class _Compiler:
         if start is None:
             self.fail(call.args[1], "enumerate() start must be an integer literal")
 
+        self.kinds[names[0]] = "num"
         prefix, seq, idx = self.bind_sequence(self.expr(call.args[0]))
         # Lua counts from 1; Python's enumerate counts from `start`.
         position: lua.Expr = lua.Name(idx)
@@ -1530,6 +1952,7 @@ class _Compiler:
 
         # Python's range excludes the stop value; Lua's numeric for includes it.
         stop = self._offset(self.expr(stop_node), 1 if descending else -1)
+        self.kinds[var] = "num"
         return lua.NumericFor(var, start, stop, step, self.loop_body(node.body))
 
     @staticmethod
@@ -1774,6 +2197,32 @@ def _without_finally(node: ast.Try) -> ast.Try:
     return ast.copy_location(inner, node)
 
 
+def _value_kind(value: object) -> str | None:
+    """The kind of a module-level constant, as folded into the script."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str | bytes):
+        return "str"
+    if isinstance(value, int | float):
+        return "num"
+    return None
+
+
+def _binop_kind(op: ast.operator, left: str | None, right: str | None) -> str | None:
+    """The kind of a binary operation from its operands' kinds.
+
+    "?" stands for a name still being worked out, as in `n = n + 1`: it takes
+    whatever kind its other assignments give it.
+    """
+    if isinstance(op, ast.Add | ast.Mult) and "str" in (left, right):
+        return "str"
+    if isinstance(op, ast.Mod) and left == "str":
+        return "str"
+    if {left, right} <= {"num", "?"}:
+        return "?" if left == right == "?" else "num"
+    return None
+
+
 def _is_none(node: ast.expr) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
@@ -1911,6 +2360,7 @@ def compile_function(
         parts.append(_AND_HELPER.rstrip())
     if compiler.needs_errmsg:
         parts.append(_ERRMSG_HELPER.rstrip())
+    parts.extend(source for helper, source in _HELPERS.items() if helper in compiler.helpers)
     parts.append(lua.emit(prelude + statements).rstrip())
 
     return CompiledScript(
