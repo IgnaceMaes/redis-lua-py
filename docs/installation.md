@@ -21,6 +21,10 @@ own script machinery, which this library defers to rather than reimplementing.
 Anything redis-py can talk to, this can run against: a standalone server, a
 cluster, Sentinel, or an in-process [fakeredis](guide/testing.md).
 
+[coredis](https://github.com/alisaifee/coredis) clients work as well, and are
+tested against, but coredis is not a dependency: install it yourself. See
+[Async](guide/async.md#coredis).
+
 ## For testing
 
 [fakeredis](https://github.com/cunla/fakeredis-py) embeds a real Lua

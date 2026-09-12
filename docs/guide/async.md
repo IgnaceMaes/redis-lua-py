@@ -27,3 +27,31 @@ own script machinery, which this defers to rather than reimplementing.
 
 [`bind`](binding-a-client.md) works on async clients just as well, and carries
 the awaitable through.
+
+## coredis
+
+[coredis](https://github.com/alisaifee/coredis), which is async only, works
+the same way. A script, a bound script and a
+[library function](redis-functions.md) each return an awaitable, and the
+overloads type it as `Awaitable[R]`:
+
+```python
+import coredis
+
+async with coredis.Redis() as client:
+    remaining = await rate_limit(client, key="user:42", limit=10, ttl=60)
+```
+
+Script caching is coredis's own `register_script`, which reloads a script the
+server has dropped. In a coredis pipeline a call is queued like any other
+command, and coredis loads the pipeline's scripts before running it; await
+each call once the `async with` block has run the pipeline:
+
+```python
+async with client.pipeline() as pipe:
+    queued = rate_limit(pipe, key="user:42", limit=10, ttl=60)
+remaining = await queued
+```
+
+As with redis-py, a client created with `decode_responses=True` decodes
+replies, so a script annotated `bytes` returns `str` from it.
