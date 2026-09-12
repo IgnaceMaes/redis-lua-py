@@ -2353,6 +2353,10 @@ class CompiledBody:
     doc: str | None
     filename: str
     first_lineno: int
+    #: Each parameter's annotation as written, in the order of ``params``.
+    param_annotations: tuple[str | None, ...] = ()
+    return_annotation: str | None = None
+    keyword_only: tuple[str, ...] = ()
 
     @property
     def provenance(self) -> str:
@@ -2389,6 +2393,9 @@ def compile_function(
         variadic_arg=compiled.variadic_arg,
         doc=compiled.doc,
         source=f"{compiled.filename}:{compiled.first_lineno}",
+        param_annotations=compiled.param_annotations,
+        return_annotation=compiled.return_annotation,
+        keyword_only=compiled.keyword_only,
     )
 
 
@@ -2454,4 +2461,12 @@ def compile_body(func: Callable[..., Any], *, name: str | None = None) -> Compil
         doc=doc,
         filename=filename,
         first_lineno=first_lineno,
+        # Kept as source text: the compiler does not need them, but a generated
+        # function repeats them in its signature.
+        param_annotations=tuple(
+            None if arg.annotation is None else ast.unparse(arg.annotation)
+            for arg in [*node.args.args, *node.args.kwonlyargs]
+        ),
+        return_annotation=None if node.returns is None else ast.unparse(node.returns),
+        keyword_only=tuple(arg.arg for arg in node.args.kwonlyargs),
     )

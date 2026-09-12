@@ -2,6 +2,7 @@
 
 Not a test module. It is imported by name, the way a project's own script
 module would be, so that the dotted-name path is exercised for real.
+``generated_scripts.py`` is what generating from it produces, checked in.
 """
 
 from __future__ import annotations
@@ -27,14 +28,32 @@ def rate_limit(key: Key, limit: int, ttl: int) -> int:
 
 @script
 def touch_all(keys: list[Key], ttl: int) -> int:
+    """Put a time to live on every key.
+
+    Returns how many of the keys exist.
+    """
+    count = 0
     for key in keys:
-        redis.expire(key, ttl)
-    return 1
+        count = count + redis.expire(key, ttl)
+    return count
 
 
 @script
 def awkward() -> bytes:
     return AWKWARD
+
+
+@script
+def echo(value: str, *, suffix: str) -> bytes:
+    """Return the value with the suffix after it."""
+    return value + suffix
+
+
+@script
+def push_all(client: Key, values: list[str]) -> int:
+    for value in values:
+        redis.rpush(client, value)
+    return redis.llen(client)
 
 
 #: A second name for the same script, which is collected once.
