@@ -67,7 +67,7 @@ __all__ = [
     "script",
 ]
 
-__version__ = "0.5.1"  # x-release-please-version
+__version__ = "0.6.0"  # x-release-please-version
 
 
 @overload
