@@ -7,6 +7,17 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.8.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.7.0...v0.8.0) (2026-09-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* a bool parameter is a boolean in the body rather than "1" or "0", and integer conversion of a non-number raises instead of giving nil.
+
+### Fixed
+
+* give bool arguments, int() and known booleans their python meaning ([#24](https://github.com/IgnaceMaes/redis-lua-py/issues/24)) ([27b3de8](https://github.com/IgnaceMaes/redis-lua-py/commit/27b3de8e7c12aea9076b940e6a7f369b054876f3))
+
 ## [0.7.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.6.0...v0.7.0) (2026-09-12)
 
 
