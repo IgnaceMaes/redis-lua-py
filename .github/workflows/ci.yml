@@ -54,7 +54,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --dev --python 3.10
-      # The floor in pyproject.toml is only a claim until something runs on it.
+      # The redis-py floor the docs name is only a claim until something runs on it.
       # fakeredis declares redis>=4.3 but works on 4.2, the first release with
       # redis.asyncio, so the pin goes in after the resolver is done.
       - run: uv pip install --no-deps "redis==4.2.0" async-timeout deprecated packaging
