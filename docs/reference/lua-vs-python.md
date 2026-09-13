@@ -4,9 +4,11 @@ These are the gaps that matter. Most are closed for you; the rest are refused.
 
 ## Truthiness is closed
 
-Lua counts `0` and `''` as true. Any condition that is not already a boolean is
-routed through a generated `__truthy` helper, so `if count:` means what it
-means in Python.
+Lua counts `0` and `''` as true. Any condition that is not known to be a
+boolean is routed through a generated `__truthy` helper, so `if count:` means
+what it means in Python. A comparison, `not`, `startswith()`, `endswith()`, a
+`bool` parameter, and a name only ever assigned one of those are used as they
+are, and `and`/`or` between them compile to Lua's own operators.
 
 ## Missing values are closed
 

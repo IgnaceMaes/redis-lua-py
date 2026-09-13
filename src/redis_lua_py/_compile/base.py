@@ -242,16 +242,21 @@ class CompilerBase(ABC):
     def kind(self, node: ast.expr) -> str | None:
         """What an expression is statically known to be, or None.
 
-        One of "str", "num", "list", "dict" or "func". Lua does not care, but
-        several translations do: a subscript is shifted to 1-based for a list
-        and not for a dict, `+` joins strings and adds numbers, `in` searches a
-        list and looks up a dict's keys, and a format spec aligns a string and
-        a number differently. None means "only known at runtime", and the
-        translation then decides there, or refuses.
+        One of "str", "num", "bool", "list", "dict" or "func". Lua does not
+        care, but several translations do: a subscript is shifted to 1-based
+        for a list and not for a dict, `+` joins strings and adds numbers, `in`
+        searches a list and looks up a dict's keys, a format spec aligns a
+        string and a number differently, and a boolean needs no truthiness
+        helper. None means "only known at runtime", and the translation then
+        decides there, or refuses.
         """
         match node:
             case ast.Constant(value=bool()):
-                return None
+                return "bool"
+            case ast.Compare() | ast.UnaryOp(op=ast.Not()):
+                return "bool"
+            case ast.BoolOp(values=values):
+                return "bool" if all(self.kind(value) == "bool" for value in values) else None
             case ast.Constant(value=str() | bytes()):
                 return "str"
             case ast.Constant(value=int() | float()):
@@ -292,6 +297,10 @@ class CompilerBase(ABC):
                     return None
                 if attr in {"upper", "lower", "strip", "lstrip", "rstrip", "replace", "join"}:
                     return "str"
+                if attr in {"encode", "decode"}:
+                    return "str"
+                if attr in {"startswith", "endswith"}:
+                    return "bool"
                 if attr == "split":
                     return "list"
                 return "num" if attr == "find" else None

@@ -30,7 +30,7 @@ to it on the way in.
 | `Key` | `KEYS[n]`, and what the cluster routes on |
 | `int`, `float` | wrapped in `tonumber`, so it is a number by the time your comparison runs |
 | `str` | passed through as the string it already is |
-| `bool` | encoded as `"1"` or `"0"` |
+| `bool` | encoded as `"1"` or `"0"`, and a Lua boolean in the body |
 | `bytes`, `memoryview` | passed through untouched — see [Binary values](binary-values.md) |
 
 ### `float` carries a caveat
@@ -41,10 +41,15 @@ text with `%.14g`, so a value with more significant digits than that does not
 come back as it went in. Annotate `str` and call `str()` at the call site when
 the value is only being carried.
 
-### `bool` deletes a conditional
+### `bool` is a boolean in the body
 
-`bool` encodes to `"1"` or `"0"`. Paired with an `int` annotation that deletes
-the `1 if flag else 0` from the call site: pass `True`, and the body gets `1`.
+`bool` travels as `"1"` or `"0"`, and arrives as `ARGV[n] == '1'`, so
+`if flag:` means what it says. `"0"` is a non-empty string, which both Lua and
+Python count as true, so passing the string through would make every flag set.
+
+A Lua boolean cannot be a command argument, as in redis-py. Write `int(flag)`
+where the body hands it to Redis, or annotate the parameter `int` instead:
+pass `True`, and the body gets `1`, with no `1 if flag else 0` at the call site.
 
 ## A variable number of keys or arguments
 

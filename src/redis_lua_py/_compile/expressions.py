@@ -393,6 +393,9 @@ class ExpressionCompiler(ScopeCompiler):
         that is a name or a literal goes through a helper; anything else is
         wrapped in a function, so it only runs when Python would run it.
         """
+        if self.kind(node) == "bool":
+            # Between booleans, Lua's and/or mean exactly what Python's do.
+            return self.condition(node)
         is_or = isinstance(node.op, ast.Or)
         self.helpers.add("__truthy")
         result = self.expr(node.values[0])
@@ -432,9 +435,11 @@ class ExpressionCompiler(ScopeCompiler):
     def condition(self, node: ast.expr) -> lua.Expr:
         """Compile an expression used for its truth value.
 
-        Lua treats 0 and '' as true, so anything that is not already a boolean
-        gets routed through the __truthy helper.
+        Lua treats 0 and '' as true, so anything that is not known to be a
+        boolean gets routed through the __truthy helper.
         """
+        if self.kind(node) == "bool" and not isinstance(node, ast.BoolOp | ast.UnaryOp):
+            return self.expr(node)
         match node:
             case ast.Compare():
                 return self.compare(node)

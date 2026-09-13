@@ -23,10 +23,11 @@ language with a faithful Lua meaning is accepted.
   a name, and slices of lists and strings, with a step or without.
 - **Strings:** f-strings with format specs; `%` formatting; `+` and `*` on a
   string; `str.join`, `upper`, `lower`, `strip`, `lstrip`, `rstrip`,
-  `startswith`, `endswith`, `find`, `split` and `replace`.
-- **Builtins and methods:** `len()`, `int()`, `float()`, `str()`, `min()`,
-  `max()`, `abs()`, `ord()`, `chr()`, `.append()`, `.insert()`, `.pop()` and
-  `dict.get()`.
+  `startswith`, `endswith`, `find`, `split` and `replace`; `encode()` and
+  `decode()` in UTF-8, which leave the bytes as they are.
+- **Builtins and methods:** `len()`, `int()`, which truncates toward zero,
+  `float()`, `str()`, `min()`, `max()`, `abs()`, `ord()`, `chr()`, `.append()`,
+  `.insert()`, `.pop()` and `dict.get()`.
 - **The `math` module:** `floor`, `ceil`, `sqrt`, `fabs`, `fmod`, `exp`,
   `log`, `log10` and `pow`, imported either way.
 - **Calls:** into `redis` and `cjson`, with `*xs` allowed as the last argument.
