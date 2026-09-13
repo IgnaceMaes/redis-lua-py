@@ -126,6 +126,15 @@ local function __add(a, b)
   end
   return a + b
 end""",
+    "__int": """\
+-- Python's int(): a number truncated toward zero, and an error rather than
+-- nil for anything that is not a number.
+local function __int(v)
+  local n = tonumber(v)
+  if n == nil then error('invalid literal for int(): ' .. tostring(v), 0) end
+  if n < 0 then return math.ceil(n) end
+  return math.floor(n)
+end""",
     "__startswith": """\
 local function __startswith(s, prefix)
   return string.sub(s, 1, #prefix) == prefix

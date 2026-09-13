@@ -135,6 +135,10 @@ class ScopeCompiler(CompilerBase):
                     # is the author asking for the conversion.
                     self.numeric_args.add(name)
                     source = lua.Call(lua.Name("tonumber"), (source,))
+                elif self._annotation_name(arg.annotation) == "bool":
+                    # A bool arrives as "1" or "0", and "0" is a string Lua and
+                    # Python both count as true. Comparing makes it a boolean.
+                    source = lua.BinOp("==", source, lua.Str("1"))
             kind = self._annotation_kind(arg.annotation)
             if kind is not None:
                 self.kinds[name] = kind
@@ -182,8 +186,9 @@ class ScopeCompiler(CompilerBase):
         name = self._annotation_name(node)
         if name in {"int", "float"}:
             return "num"
-        # A bool arrives as the string "1" or "0", like every other ARGV.
-        if name in {"Key", "str", "bytes", "memoryview", "bool"}:
+        if name == "bool":
+            return "bool"
+        if name in {"Key", "str", "bytes", "memoryview"}:
             return "str"
         return None
 

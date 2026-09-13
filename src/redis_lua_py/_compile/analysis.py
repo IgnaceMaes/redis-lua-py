@@ -217,7 +217,7 @@ def without_finally(node: ast.Try) -> ast.Try:
 def value_kind(value: object) -> str | None:
     """The kind of a module-level constant, as folded into the script."""
     if isinstance(value, bool):
-        return None
+        return "bool"
     if isinstance(value, str | bytes):
         return "str"
     if isinstance(value, int | float):

@@ -42,6 +42,8 @@ class CallCompiler(ExpressionCompiler):
                     self.helpers.add("__dictlen")
                     return lua.Call(lua.Name("__dictlen"), args)
                 return lua.UnOp("#", args[0])
+            case ast.Name(id="int"):
+                return self.int_call(node, args)
             case ast.Name(id=name) if name in BUILTIN_FUNCS:
                 return lua.Call(lua.Name(BUILTIN_FUNCS[name]), args)
             case ast.Attribute(value=receiver, attr="join") if not self.is_namespace(receiver):
@@ -86,6 +88,17 @@ class CallCompiler(ExpressionCompiler):
             else:
                 args.append(self.expr(arg))
         return tuple(args)
+
+    def int_call(self, node: ast.Call, args: tuple[lua.Expr, ...]) -> lua.Expr:
+        """``int(x)``: truncated toward zero, which tonumber alone does not do."""
+        if len(args) != 1:
+            self.fail(
+                node, "int() takes exactly one argument", hint="int() with a base is not supported."
+            )
+        if self.kind(node.args[0]) == "bool":
+            return lua.BinOp("or", lua.BinOp("and", args[0], lua.Num(1)), lua.Num(0))
+        self.helpers.add("__int")
+        return lua.Call(lua.Name("__int"), args)
 
     def math_call(self, node: ast.Call, attr: str, args: tuple[lua.Expr, ...]) -> lua.Expr:
         if attr == "log":
@@ -135,6 +148,16 @@ class CallCompiler(ExpressionCompiler):
     ) -> lua.Expr:
         """The str methods, and dict.get, over Lua's string library and helpers."""
         target = self.expr(receiver)
+        if attr in {"encode", "decode"}:
+            # Every Lua string is already bytes, so there is nothing to convert.
+            if len(node.args) > 1 or (node.args and not is_utf8(node.args[0])):
+                self.fail(
+                    node,
+                    f"{attr}() only supports UTF-8 inside a script",
+                    hint="Lua strings are bytes, so encode() and decode() leave them as they are; "
+                    "another encoding has no counterpart.",
+                )
+            return target
         allowed = {"get": (1, 2), "split": (0, 1), "replace": (2,)}.get(attr)
         if allowed is None:
             allowed = (0,) if attr in {"upper", "lower", "strip", "lstrip", "rstrip"} else (1,)
@@ -252,6 +275,13 @@ class CallCompiler(ExpressionCompiler):
                 prefix=f"{head.lower()}_",
             ),
         )
+
+
+def is_utf8(node: ast.expr) -> bool:
+    """Whether an encode()/decode() argument names UTF-8."""
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return False
+    return node.value.lower().replace("_", "-") in {"utf-8", "utf8"}
 
 
 def listing(names: list[str], limit: int = 6) -> str:

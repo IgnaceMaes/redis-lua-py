@@ -119,8 +119,8 @@ MATH_BY_OBJECT: dict[object, str] = {getattr(math, name): name for name in [*MAT
 
 METHOD_HINT = (
     "Available: the redis and cjson namespaces; list append, insert and pop; str join, "
-    "upper, lower, strip, lstrip, rstrip, startswith, endswith, find, split and replace; "
-    "and dict get."
+    "upper, lower, strip, lstrip, rstrip, startswith, endswith, find, split, replace, "
+    "encode and decode; and dict get."
 )
 
 
@@ -139,6 +139,8 @@ STRING_METHODS = frozenset(
         "find",
         "split",
         "replace",
+        "encode",
+        "decode",
         "get",
     }
 )

@@ -30,7 +30,9 @@ def preview(doc: Key) -> list[int | bytes]:
 
 `b""` and `""` compile to the same Lua string; only one of them also describes
 what the caller receives, which keeps the body and the signature agreeing
-about the same thing.
+about the same thing. For a string built in the body, `str(n).encode()` does
+the same: Lua strings are already bytes, so `encode()` compiles to nothing, and
+the body type-checks against `-> bytes`.
 
 Return values follow Redis' own conversion rules: `True` becomes `1`, `False`
 and `None` become nil, floats are truncated to integers. Return a string, or
