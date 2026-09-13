@@ -7,6 +7,17 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.9.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.8.0...v0.9.0) (2026-09-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* installing redis-lua-py no longer installs redis-py. Add redis-py or coredis to your own dependencies.
+
+### Added
+
+* drop the redis-py dependency ([#26](https://github.com/IgnaceMaes/redis-lua-py/issues/26)) ([e6e40e9](https://github.com/IgnaceMaes/redis-lua-py/commit/e6e40e914afb4043468d9b5b15f970940effcd63))
+
 ## [0.8.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.7.0...v0.8.0) (2026-09-13)
 
 
