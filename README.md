@@ -63,7 +63,7 @@ for the script namespace, so the two never collide.
 uv add redis-lua-py
 ```
 
-Python 3.10+, and redis-py 4.2+ as the only dependency.
+Python 3.10+, and no dependencies: bring your own client, redis-py 4.2+ or coredis.
 
 ## What it compiles to
 

@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Database",
     "Typing :: Typed",
 ]
-dependencies = ["redis>=4.2"]
+dependencies = []
 
 [project.urls]
 Homepage = "https://ignacemaes.com/redis-lua-py/"
@@ -33,6 +33,9 @@ redis-lua-py = "redis_lua_py.__main__:main"
 
 [dependency-groups]
 dev = [
+    # The client every test runs through. Not a dependency of the package, which
+    # only calls the client it is handed: that client's library is already installed.
+    "redis>=4.2",
     "pytest>=8.3",
     "pytest-asyncio>=1.0",
     "fakeredis[lua]>=2.30",
