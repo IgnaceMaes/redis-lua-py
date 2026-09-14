@@ -58,6 +58,22 @@ commands are checked down to the subcommand, and a hyphenated one is reached
 through its underscores — `redis.client_no_evict("on")` compiles to
 `redis.call('CLIENT', 'NO-EVICT', 'on')`.
 
+## In your editor
+
+Type checkers see every command as a method, generated from the same command
+definitions as the table, so hovering `redis.hset` shows what the command does,
+its syntax, its reply and its complexity, with a link to its page on redis.io.
+The Lua API's own functions, such as `redis.pcall` and `redis.log`, and
+`cjson.encode` / `cjson.decode`, are documented the same way.
+
+The leading plain arguments are named, so a call with too few or too many is
+flagged before the compiler sees it. Past the first option the order depends on
+which options are given, so the rest is `*args` and the syntax in the hover says
+what goes there. Every return type is `Any`: what a reply looks like inside Lua
+is not something Python can know. A spelling that is not one method per
+command, such as `redis.debug_object(k)`, still type-checks, and is left to the
+compiler.
+
 ## The escape hatch
 
 `redis.call(...)` is deliberately never checked. It is the escape hatch for

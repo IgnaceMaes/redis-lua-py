@@ -79,6 +79,10 @@ Names are checked at compile time against Redis' own command table;
 The compiler identifies the namespace by value rather than by the name it is
 imported under, so every alias works and nothing is reserved.
 
+Type checkers see a method per command, documented from Redis' own command
+definitions, so an editor shows each command's syntax on hover. See
+[In your editor](../guide/calling-redis-commands.md#in-your-editor).
+
 ## `call`
 
 An alias of [`redis`](#redis), for modules that would rather not rename

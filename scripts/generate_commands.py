@@ -1,4 +1,4 @@
-"""Regenerate ``src/redis_lua_py/_commands.py`` from the Redis source tree.
+"""Regenerate the command table and its typed stubs from the Redis source tree.
 
 The compiler refuses a command Redis does not have, which means it needs to
 know what Redis has. The authority for that is ``src/commands/*.json`` in the
@@ -6,6 +6,12 @@ Redis repository — the same files the server itself is built from — so this
 downloads a tagged release and reads them rather than transcribing a list.
 
     uv run python scripts/generate_commands.py [version]
+
+Two files come out of it. ``src/redis_lua_py/_commands.py`` is the table the
+compiler checks names against. ``src/redis_lua_py/_command_stubs.py`` is a class
+with one method per command, carrying the summary, syntax and complexity from
+the same JSON, which type checkers see in place of the namespace so that an
+editor can show them on hover.
 
 Run it when a Redis release adds commands, and commit the result. The command
 table only gates the ``redis.<name>()`` spelling: ``redis.call('NEW.CMD', ...)``
@@ -16,17 +22,34 @@ from __future__ import annotations
 
 import io
 import json
+import keyword
+import re
+import subprocess
 import sys
 import tarfile
+import textwrap
 import urllib.request
 from pathlib import Path
+from typing import Any
+
+from redis_lua_py._compile.tables import COMMAND_ALIASES, REDIS_DIRECT
 
 DEFAULT_VERSION = "8.10.1"
 SOURCE = "https://github.com/redis/redis/archive/refs/tags/{version}.tar.gz"
-TARGET = Path(__file__).resolve().parent.parent / "src" / "redis_lua_py" / "_commands.py"
+PACKAGE = Path(__file__).resolve().parent.parent / "src" / "redis_lua_py"
+TABLE = PACKAGE / "_commands.py"
+STUBS = PACKAGE / "_command_stubs.py"
+
+Spec = dict[str, Any]
+
+#: Argument types that are a single value, and so can be a named parameter.
+VALUE_TYPES = frozenset({"key", "string", "integer", "double", "unix-time", "pattern"})
+
+#: Docstring text is wrapped to this, inside a method eight spaces deep.
+WIDTH = 88
 
 
-def fetch(version: str) -> tuple[set[str], dict[str, set[str]]]:
+def fetch(version: str) -> tuple[dict[str, Spec], dict[str, dict[str, Spec]]]:
     """Read every command definition out of a released Redis tarball.
 
     A subcommand's file names it bare -- ``hotkeys-get.json`` defines ``GET``
@@ -39,8 +62,8 @@ def fetch(version: str) -> tuple[set[str], dict[str, set[str]]]:
     with urllib.request.urlopen(url) as response:
         payload = response.read()
 
-    commands: set[str] = set()
-    subcommands: dict[str, set[str]] = {}
+    commands: dict[str, Spec] = {}
+    subcommands: dict[str, dict[str, Spec]] = {}
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         for member in archive.getmembers():
             parts = Path(member.name).parts
@@ -52,15 +75,15 @@ def fetch(version: str) -> tuple[set[str], dict[str, set[str]]]:
             for name, spec in json.loads(handle.read()).items():
                 container = spec.get("container")
                 if isinstance(container, str):
-                    subcommands.setdefault(container.upper(), set()).add(name.upper())
+                    subcommands.setdefault(container.upper(), {})[name.upper()] = spec
                 else:
-                    commands.add(name.upper())
+                    commands[name.upper()] = spec
     if not commands:
         raise SystemExit(f"no command definitions found in {url}")
     return commands, subcommands
 
 
-def render(version: str, commands: set[str], subcommands: dict[str, set[str]]) -> str:
+def render_table(version: str, commands: set[str], subcommands: dict[str, set[str]]) -> str:
     lines = [
         '"""The commands Redis accepts, by name.',
         "",
@@ -90,12 +113,213 @@ def render(version: str, commands: set[str], subcommands: dict[str, set[str]]) -
     return "\n".join(lines)
 
 
+def syntax(arg: Spec) -> str:
+    """Render one argument the way the Redis documentation writes it."""
+    kind = arg["type"]
+    token = arg.get("token")
+    if kind == "pure-token":
+        text = token or arg.get("display_text") or arg["name"].upper()
+    else:
+        if kind == "oneof":
+            text = " | ".join(syntax(child) for child in arg["arguments"])
+            if not arg.get("optional") or token or arg.get("multiple"):
+                text = f"<{text}>"
+        elif kind == "block":
+            text = " ".join(syntax(child) for child in arg["arguments"])
+        else:
+            text = arg.get("display", arg["name"])
+        if arg.get("multiple"):
+            if token and arg.get("multiple_token"):
+                text = f"{token} {text} [{token} {text} ...]"
+            else:
+                text = f"{text} [{text} ...]"
+                if token:
+                    text = f"{token} {text}"
+        elif token:
+            text = f"{token} {text}"
+    return f"[{text}]" if arg.get("optional") else text
+
+
+def identifier(name: str, taken: set[str]) -> str:
+    base = re.sub(r"\W", "_", name.lower())
+    if keyword.iskeyword(base) or base in {"self", "args"} or base[0].isdigit():
+        base += "_"
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate, n = f"{base}{n}", n + 1
+    taken.add(candidate)
+    return candidate
+
+
+def parameters(tokens: tuple[str, ...], spec: Spec) -> tuple[list[str], bool]:
+    """The named parameters a command takes, and whether more may follow.
+
+    Only the leading run of plain required values is named. Past the first
+    token, option or group, the order and count depend on which options are
+    given, so the rest is left to ``*args`` and the syntax in the docstring.
+    Redis' own arity settles the count: a signature that disagrees with it is
+    widened to ``*args`` rather than trusted.
+    """
+    arguments = spec.get("arguments", [])
+    names: list[str] = []
+    taken: set[str] = set()
+    rest = False
+    for arg in arguments:
+        if arg["type"] not in VALUE_TYPES or arg.get("token") or arg.get("optional"):
+            rest = True
+            break
+        names.append(identifier(arg["name"], taken))
+        if arg.get("multiple"):
+            rest = True
+            break
+
+    arity = spec["arity"]
+    fixed = len(tokens) + len(names)
+    if arity < 0:
+        if fixed > -arity:
+            names = names[: -arity - len(tokens)]
+        return names, True
+    if rest or fixed != arity:
+        return names[: max(arity - len(tokens), 0)], True
+    return names, False
+
+
+def plain(text: str) -> str:
+    """Turn the JSON's Markdown code spans into reST ones: `!GET` -> ``GET``."""
+    return re.sub(r"`!?([^`]+)`", r"``\1``", " ".join(text.split()))
+
+
+def replies(schema: Spec) -> list[str]:
+    if "description" in schema:
+        return [schema["description"]]
+    for key in ("oneOf", "anyOf"):
+        if key in schema:
+            return [option["description"] for option in schema[key] if "description" in option]
+    return []
+
+
+def docstring(tokens: tuple[str, ...], spec: Spec, has_args: bool) -> list[str]:
+    paragraphs: list[list[str]] = [textwrap.wrap(plain(spec["summary"]), WIDTH)]
+
+    if "deprecated_since" in spec:
+        note = f"Deprecated since Redis {spec['deprecated_since']}"
+        if "replaced_by" in spec:
+            note += f", replaced by {plain(spec['replaced_by'])}"
+        paragraphs.append(textwrap.wrap(note + ".", WIDTH))
+
+    usage = " ".join([*tokens, *(syntax(arg) for arg in spec.get("arguments", []))])
+    wrapped = textwrap.wrap(
+        usage,
+        WIDTH - 4,
+        subsequent_indent="    ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    paragraphs.append(["Syntax::"])
+    paragraphs.append(["    " + line for line in wrapped])
+
+    reply = [plain(text) for text in replies(spec.get("reply_schema", {}))]
+    if len(reply) == 1:
+        paragraphs.append(textwrap.wrap(f"Reply: {reply[0]}", WIDTH))
+    elif reply:
+        bullets = ["Reply, one of:", ""]
+        for text in reply:
+            bullets += textwrap.wrap(text, WIDTH, initial_indent="- ", subsequent_indent="  ")
+        paragraphs.append(bullets)
+
+    if "complexity" in spec:
+        paragraphs.append(textwrap.wrap(f"Time complexity: {plain(spec['complexity'])}", WIDTH))
+
+    call = ", ".join([*(f"'{token}'" for token in tokens), *(["..."] if has_args else [])])
+    paragraphs.append(
+        textwrap.wrap(
+            f"Available since Redis {spec['since']}. Compiles to ``redis.call({call})``.", WIDTH
+        )
+    )
+    if spec["group"] != "sentinel":  # Sentinel commands have no page of their own.
+        page = "-".join(tokens).lower()
+        paragraphs.append([f"https://redis.io/docs/latest/commands/{page}/"])
+
+    lines: list[str] = []
+    for paragraph in paragraphs:
+        if lines:
+            lines.append("")
+        lines += paragraph
+    return lines
+
+
+def method(name: str, tokens: tuple[str, ...], spec: Spec) -> list[str]:
+    names, rest = parameters(tokens, spec)
+    params = ["self", *(f"{param}: Any" for param in names)]
+    if names:
+        params.append("/")
+    if rest:
+        params.append("*args: Any")
+
+    doc = [line.replace("\\", "\\\\") for line in docstring(tokens, spec, bool(names) or rest)]
+    lines = [f"    def {name}({', '.join(params)}) -> Any:"]
+    lines.append(f'        """{doc[0]}')
+    lines += [f"        {line}".rstrip() for line in doc[1:]]
+    lines.append('        """')
+    return lines
+
+
+def render_stubs(
+    version: str, commands: dict[str, Spec], subcommands: dict[str, dict[str, Spec]]
+) -> str:
+    entries: dict[str, tuple[tuple[str, ...], Spec]] = {}
+    for command, spec in commands.items():
+        if command in subcommands:
+            continue  # A container needs a subcommand; it is not callable bare.
+        if "-" in command and command.split("-")[0] in commands:
+            # redis.restore_asking reaches RESTORE with an ASKING argument, not
+            # RESTORE-ASKING, so a stub under that name would describe the wrong command.
+            continue
+        entries[command.lower().replace("-", "_")] = ((command,), spec)
+    for container, members in subcommands.items():
+        for sub, spec in members.items():
+            entries[f"{container}_{sub}".lower().replace("-", "_")] = ((container, sub), spec)
+    for alias, tokens in COMMAND_ALIASES.items():
+        entries[alias] = (tokens, commands[tokens[0]])
+    for name in [*entries]:
+        if keyword.iskeyword(name) or name in REDIS_DIRECT:
+            del entries[name]
+
+    lines = [
+        '"""A typed method for every Redis command a script body can call.',
+        "",
+        f"Generated by scripts/generate_commands.py from Redis {version}. Do not edit.",
+        "",
+        "Nothing imports this at runtime. Type checkers see the ``redis`` namespace as",
+        "a subclass of ``RedisCommands``, so an editor can show each command's syntax",
+        "and documentation on hover, while the compiler goes on resolving the",
+        "namespace by value.",
+        '"""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from typing import Any",
+        "",
+        "",
+        "class RedisCommands:",
+        '    """The Redis commands, as ``redis.<name>(...)`` spells them."""',
+    ]
+    for name in sorted(entries):
+        lines.append("")
+        lines += method(name, *entries[name])
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> None:
     version = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_VERSION
     commands, subcommands = fetch(version)
-    TARGET.write_text(render(version, commands, subcommands))
+    names = {container: set(members) for container, members in subcommands.items()}
+    TABLE.write_text(render_table(version, set(commands), names))
+    STUBS.write_text(render_stubs(version, commands, subcommands))
+    subprocess.run([sys.executable, "-m", "ruff", "format", str(STUBS)], check=True)
     print(
-        f"wrote {TARGET.relative_to(Path.cwd())}: "
+        f"wrote {TABLE.relative_to(Path.cwd())} and {STUBS.relative_to(Path.cwd())}: "
         f"{len(commands)} commands, {len(subcommands)} containers",
         file=sys.stderr,
     )
