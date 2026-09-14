@@ -7,11 +7,20 @@ compiles, it reads correctly, and it raises the first time its branch runs.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import keyword
 from collections.abc import Callable
+from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from redis_lua_py import CompiledScript, Key, UnsupportedSyntax, redis, script
+from redis_lua_py._command_stubs import RedisCommands
+from redis_lua_py._commands import COMMANDS, SUBCOMMANDS
+from redis_lua_py._compile.statements import Compiler
+from redis_lua_py._compile.tables import COMMAND_ALIASES, REDIS_CONSTANTS, REDIS_DIRECT
 
 Body = Callable[[CompiledScript[object]], str]
 
@@ -196,3 +205,66 @@ def test_the_table_matches_the_commands_redis_py_exposes() -> None:
     # Each redis-py release exposes a different set of these (graph left, vset
     # arrived), so only the exceptions this one actually has are expected.
     assert refused == expected_failures & checked
+
+
+class TestTypedStubs:
+    """What an editor shows for ``redis.<name>`` has to be what the compiler does with it."""
+
+    stubs: ClassVar[dict[str, object]] = {
+        name: member
+        for name, member in vars(RedisCommands).items()
+        if not name.startswith("_") and callable(member)
+    }
+
+    def test_every_stub_compiles_to_the_command_its_docstring_shows(self) -> None:
+        compiler = Compiler(
+            ast.parse("def f(): pass").body[0],  # type: ignore[arg-type]
+            filename="<check>",
+            first_lineno=1,
+            lines=["def f(): pass"],
+            globalns={},
+        )
+        node = ast.parse("f()").body[0].value  # type: ignore[attr-defined]
+
+        mismatched = {}
+        for name, member in self.stubs.items():
+            tokens = compiler.command_tokens(node, name)
+            usage = (inspect.getdoc(member) or "").split("Syntax::")[1].split()
+            if tuple(usage[: len(tokens)]) != tokens:
+                mismatched[name] = tokens
+
+        assert mismatched == {}
+
+    def test_every_command_has_a_stub(self) -> None:
+        """Regenerating the table without the stubs would leave editors a release behind."""
+        # RESTORE-ASKING is spelled restore_asking, which reaches RESTORE instead.
+        spellings = {
+            name
+            for name in COMMANDS
+            if name not in SUBCOMMANDS and name.split("-")[0] not in COMMANDS - {name}
+        }
+        spellings |= {f"{head}_{sub}" for head, subs in SUBCOMMANDS.items() for sub in subs}
+        expected = {name.lower().replace("-", "_") for name in spellings} | set(COMMAND_ALIASES)
+        expected = {name for name in expected if not keyword.iskeyword(name)} - REDIS_DIRECT
+
+        assert set(self.stubs) == expected
+
+    def test_the_namespace_types_the_lua_api_too(self) -> None:
+        """The functions and constants that keep their own names are written by hand."""
+        from redis_lua_py import _runtime
+
+        tree = ast.parse(Path(_runtime.__file__).read_text())
+        (namespace,) = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == "RedisNamespace"
+        ]
+        members = {node.name for node in namespace.body if isinstance(node, ast.FunctionDef)}
+        members |= {
+            node.target.id
+            for node in namespace.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+
+        assert members >= REDIS_DIRECT
+        assert members >= REDIS_CONSTANTS

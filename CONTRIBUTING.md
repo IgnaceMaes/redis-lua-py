@@ -12,8 +12,9 @@ Redis.
 
 `src/redis_lua_py/_commands.py` is generated, not written. It is the table
 command names are checked against, and it comes from the command definitions
-in the Redis source. Refresh it when a Redis release adds commands, and commit
-the result:
+in the Redis source. The same run writes `src/redis_lua_py/_command_stubs.py`,
+the typed method per command that editors show on hover. Refresh both when a
+Redis release adds commands, and commit the result:
 
 ```sh
 uv run python scripts/generate_commands.py 8.10.1

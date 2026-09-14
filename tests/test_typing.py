@@ -15,7 +15,15 @@ import redis
 import redis.asyncio
 
 import generated_scripts
-from redis_lua_py import BoundScript, CompiledScript, Key, Library, LibraryFunction, script
+from redis_lua_py import (
+    BoundScript,
+    CompiledScript,
+    Key,
+    Library,
+    LibraryFunction,
+    cjson,
+    script,
+)
 from redis_lua_py import redis as r
 
 if sys.version_info >= (3, 11):
@@ -111,3 +119,20 @@ def test_the_annotation_does_not_change_what_runs() -> None:
     """The compiler ignores the annotation; only the caller's types see it."""
     assert counter.name == "counter"
     assert "redis.call('INCR', k)" in counter.lua
+
+
+@script
+def typed_namespace(k: Key, pairs: list[str], ttl: int) -> int:
+    """Commands are typed methods; everything the compiler accepts still checks."""
+    r.hset(k, "field", "value")
+    r.hset(k, *pairs)
+    r.expire(k, ttl, "NX")
+    r.set(k, "value", "EX", ttl)
+    r.debug_object(k)
+    r.call("JSON.SET", k, "$", "{}")
+    r.log(r.LOG_WARNING, "touched", k)
+    cjson.decode(cjson.encode(pairs))
+    # INCR takes exactly one key: the unused-ignore warning under strict fails
+    # the build if the stub ever stops saying so.
+    r.incr(k, 1)  # type: ignore[call-arg]
+    return r.delete(k)
