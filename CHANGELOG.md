@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.10.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.9.0...v0.10.0) (2026-09-14)
+
+
+### Added
+
+* document every redis command on hover in editors ([#28](https://github.com/IgnaceMaes/redis-lua-py/issues/28)) ([5d86e35](https://github.com/IgnaceMaes/redis-lua-py/commit/5d86e355c97d9a597cfc59985feaa88bc3a6fc17))
+
 ## [0.9.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.8.0...v0.9.0) (2026-09-13)
 
 
