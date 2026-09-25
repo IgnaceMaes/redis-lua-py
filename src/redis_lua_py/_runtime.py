@@ -183,6 +183,13 @@ if TYPE_CHECKING:
     class CjsonNamespace:
         """The JSON library Redis exposes to scripts, as type checkers see it."""
 
+        null: Any
+        """JSON ``null``: what ``decode`` gives for one, and ``encode`` writes as one.
+
+        ``None`` is Lua's ``nil``, and a field set to it is dropped from the object
+        rather than encoded as ``null``.
+        """
+
         def encode(self, value: Any, /) -> Any:
             """Serialize a Lua value to a JSON string."""
 

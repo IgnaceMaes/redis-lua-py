@@ -19,6 +19,24 @@ never runs. `x is None` compiles to a helper accepting both, which also takes
 twice. `x == None` and `x != None` compile to the same helper, since that is
 plainly what they mean.
 
+`cjson.decode` gives JSON `null` as `cjson.null`, which is neither: compare
+with `== cjson.null`. Setting a field to `None` removes it, so write
+`cjson.null` where the encoded object should keep the field as `null`.
+
+## `isinstance` has Lua's types
+
+`isinstance(x, dict)` compiles to `type(x) == 'table'`, the usual guard on a
+decoded JSON value before reading its fields. Lua has fewer types than Python,
+so some tests answer for more than their name says:
+
+- `int` and `float` both test for a number, which may have a fraction;
+- `dict` and `list` both test for a table;
+- `str` and `bytes` both test for a string;
+- `bool` is not a number, so `isinstance(True, int)` is false.
+
+A tuple or a `|` union of types tests for any of them. A class of your own has
+no Lua counterpart, and is refused.
+
 ## Indexing is closed
 
 Lua tables are 1-based. `items[0]` compiles to `items[1]`. Write Python indices

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from redis_lua_py import CompiledScript, Key, UnsupportedSyntax, redis, script
+from redis_lua_py import CompiledScript, Key, UnsupportedSyntax, cjson, redis, script
 
 Body = Callable[[CompiledScript[object]], str]
 
@@ -160,3 +160,106 @@ class TestEncodeDecode:
             @script
             def s(text: str) -> bytes:
                 return text.encode("latin-1")
+
+
+class TestIsinstance:
+    """isinstance() tests Lua's type(), which has one number and one table type."""
+
+    def test_rejects_json_that_is_not_an_object(self, client: Any) -> None:
+        @script
+        def s(k: Key) -> int:
+            data = cjson.decode(redis.get(k))
+            if not isinstance(data, dict):
+                return 0
+            return 1
+
+        client.set("doc", '{"a": 1}')
+        assert s(client, k="doc") == 1
+        client.set("doc", '"a string"')
+        assert s(client, k="doc") == 0
+        client.set("doc", "42")
+        assert s(client, k="doc") == 0
+
+    def test_each_builtin_type(self, client: Any) -> None:
+        @script
+        def s(k: Key) -> list[int]:
+            data = cjson.decode(redis.get(k))
+            return [
+                int(isinstance(data["s"], str)),
+                int(isinstance(data["n"], int)),
+                int(isinstance(data["n"], float)),
+                int(isinstance(data["b"], bool)),
+                int(isinstance(data["l"], list)),
+                int(isinstance(data["s"], bytes)),
+                int(isinstance(data["b"], int)),
+            ]
+
+        client.set("doc", '{"s": "x", "n": 1.5, "b": true, "l": [1]}')
+        assert s(client, k="doc") == [1, 1, 1, 1, 1, 1, 0]
+
+    def test_several_types_as_a_tuple_or_a_union(self, client: Any, body: Body) -> None:
+        @script
+        def s(k: Key) -> list[int]:
+            v = cjson.decode(redis.get(k))
+            return [int(isinstance(v, (str, int))), int(isinstance(v, str | bool))]
+
+        emitted = body(s)
+        assert "type(v) == 'string' or type(v) == 'number'" in emitted
+        client.set("doc", "7")
+        assert s(client, k="doc") == [1, 0]
+        client.set("doc", "true")
+        assert s(client, k="doc") == [0, 1]
+
+    def test_is_a_known_boolean(self, body: Body) -> None:
+        @script
+        def s(k: Key) -> int:
+            if isinstance(redis.get(k), str):
+                return 1
+            return 0
+
+        assert "__truthy" not in body(s)
+
+    def test_a_class_is_refused(self) -> None:
+        class Point:
+            pass
+
+        with pytest.raises(UnsupportedSyntax, match="only tests for a builtin type"):
+
+            @script
+            def s(k: Key) -> int:
+                return int(isinstance(redis.get(k), Point))
+
+    def test_several_types_of_an_expression_is_refused(self) -> None:
+        with pytest.raises(UnsupportedSyntax, match="needs a name"):
+
+            @script
+            def s(k: Key) -> int:
+                return int(isinstance(redis.get(k), (str, int)))
+
+
+class TestCjsonNull:
+    """cjson.null writes a JSON null, where None would drop the field."""
+
+    def test_encodes_as_null(self, client: Any) -> None:
+        @script
+        def s(k: Key) -> bytes:
+            data = cjson.decode(redis.get(k))
+            data["error"] = cjson.null
+            data["gone"] = None
+            return cjson.encode(data)
+
+        client.set("doc", '{"error": "boom", "gone": 1}')
+        assert s(client, k="doc") == b'{"error":null}'
+
+    def test_compares_to_a_decoded_null(self, client: Any) -> None:
+        @script
+        def s(k: Key) -> int:
+            data = cjson.decode(redis.get(k))
+            if data["v"] == cjson.null:
+                return 1
+            return 0
+
+        client.set("doc", '{"v": null}')
+        assert s(client, k="doc") == 1
+        client.set("doc", '{"v": 0}')
+        assert s(client, k="doc") == 0

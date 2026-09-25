@@ -7,11 +7,13 @@ import difflib
 
 from .. import _lua as lua
 from .._commands import COMMANDS, SUBCOMMANDS
+from .analysis import is_cheap
 from .expressions import ExpressionCompiler
 from .tables import (
     BUILTIN_FUNCS,
     COMMAND_ALIASES,
     COMMAND_SPELLINGS,
+    ISINSTANCE_TYPES,
     MATH_FUNCS,
     METHOD_HINT,
     REDIS_DIRECT,
@@ -25,6 +27,13 @@ class CallCompiler(ExpressionCompiler):
     def call(self, node: ast.Call) -> lua.Expr:
         if node.keywords:
             self.fail(node, "keyword arguments are not supported in a script body")
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "isinstance"
+            and not self.is_callable("isinstance")
+        ):
+            # Its second argument names types, which have no value in Lua.
+            return self.isinstance_call(node)
         args = self.call_args(node)
 
         math_attr = self.math_attr(node.func)
@@ -99,6 +108,42 @@ class CallCompiler(ExpressionCompiler):
             return lua.BinOp("or", lua.BinOp("and", args[0], lua.Num(1)), lua.Num(0))
         self.helpers.add("__int")
         return lua.Call(lua.Name("__int"), args)
+
+    def isinstance_call(self, node: ast.Call) -> lua.Expr:
+        """``isinstance(x, T)``: a test of Lua's ``type()``, which has fewer types."""
+        if len(node.args) != 2 or isinstance(node.args[0], ast.Starred):
+            self.fail(node, "isinstance() takes exactly two arguments")
+        match node.args[1]:
+            case ast.Tuple(elts=elts):
+                classes = elts
+            case ast.BinOp(op=ast.BitOr()) as union:
+                classes = union_members(union)
+            case single:
+                classes = [single]
+        lua_types: list[str] = []
+        for cls in classes:
+            if not isinstance(cls, ast.Name) or cls.id not in ISINSTANCE_TYPES:
+                self.fail(
+                    cls,
+                    "isinstance() only tests for a builtin type",
+                    hint=f"Available: {', '.join(ISINSTANCE_TYPES)}. Lua knows no classes.",
+                )
+            if ISINSTANCE_TYPES[cls.id] not in lua_types:
+                lua_types.append(ISINSTANCE_TYPES[cls.id])
+        subject = self.expr(node.args[0])
+        if len(lua_types) > 1 and not is_cheap(node.args[0]):
+            self.fail(
+                node.args[0],
+                "isinstance() against several types needs a name to test",
+                hint="Assign the value to a name first, so that it is evaluated once.",
+            )
+        tests = [
+            lua.BinOp("==", lua.Call(lua.Name("type"), (subject,)), lua.Str(t)) for t in lua_types
+        ]
+        test = tests[0]
+        for other in tests[1:]:
+            test = lua.BinOp("or", test, other)
+        return test
 
     def math_call(self, node: ast.Call, attr: str, args: tuple[lua.Expr, ...]) -> lua.Expr:
         if attr == "log":
@@ -296,3 +341,10 @@ def did_you_mean(attr: str, options: set[str], prefix: str = "") -> str | None:
     if not matches:
         return None
     return f"Did you mean redis.{prefix}{matches[0]}()?"
+
+
+def union_members(node: ast.expr) -> list[ast.expr]:
+    """The classes of an ``A | B | C`` union, left to right."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return [*union_members(node.left), *union_members(node.right)]
+    return [node]
