@@ -18,6 +18,7 @@ from .tables import (
     METHOD_HINT,
     REDIS_DIRECT,
     STRING_METHODS,
+    STRING_TESTS,
 )
 
 
@@ -26,7 +27,12 @@ class CallCompiler(ExpressionCompiler):
 
     def call(self, node: ast.Call) -> lua.Expr:
         if node.keywords:
-            self.fail(node, "keyword arguments are not supported in a script body")
+            self.fail(
+                node,
+                "keyword arguments are not supported in a script body",
+                hint="Pass a Redis command's options positionally, as its syntax "
+                "writes them: redis.set(key, value, 'EX', ttl), not ex=ttl.",
+            )
         if (
             isinstance(node.func, ast.Name)
             and node.func.id == "isinstance"
@@ -205,7 +211,8 @@ class CallCompiler(ExpressionCompiler):
             return target
         allowed = {"get": (1, 2), "split": (0, 1), "replace": (2,)}.get(attr)
         if allowed is None:
-            allowed = (0,) if attr in {"upper", "lower", "strip", "lstrip", "rstrip"} else (1,)
+            no_args = {"upper", "lower", "strip", "lstrip", "rstrip", *STRING_TESTS}
+            allowed = (0,) if attr in no_args else (1,)
         if len(args) not in allowed:
             if attr in {"strip", "lstrip", "rstrip"}:
                 self.fail(
@@ -218,6 +225,9 @@ class CallCompiler(ExpressionCompiler):
 
         if attr in {"upper", "lower"}:
             return lua.Call(lua.Global(f"string.{attr}"), (target,))
+        if attr in STRING_TESTS:
+            found = lua.Call(lua.Global("string.find"), (target, lua.Str(STRING_TESTS[attr])))
+            return lua.BinOp("~=", found, lua.Nil())
         if attr in {"strip", "lstrip", "rstrip"}:
             pattern = {"strip": "^%s*(.-)%s*$", "lstrip": "^%s*(.*)$", "rstrip": "^(.-)%s*$"}
             return lua.Call(lua.Global("string.match"), (target, lua.Str(pattern[attr])))

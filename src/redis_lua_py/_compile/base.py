@@ -26,7 +26,7 @@ from .. import _lua as lua
 from .._runtime import _Namespace
 from ..errors import UnsupportedSyntax
 from .analysis import UNBOUND, as_literal, binop_kind, dotted_name, value_kind
-from .tables import MATH_BY_OBJECT, RECEIVER_FALLBACK, REDIS_CONSTANTS
+from .tables import MATH_BY_OBJECT, RECEIVER_FALLBACK, REDIS_CONSTANTS, STRING_TESTS
 
 
 def is_redis_py(value: object) -> bool:
@@ -82,6 +82,9 @@ class CompilerBase(ABC):
         self.helpers: set[str] = set()
         # What a parameter or loop variable is known to be; see kind().
         self.kinds: dict[str, str] = {}
+        # Kinds that an annotation on a local declares. They are the author's
+        # word, so they win over what the assigned values suggest.
+        self.declared: dict[str, str] = {}
         # Every value assigned to each name, to work out what a local holds.
         self.values: dict[str, list[ast.expr]] = {}
         # Names bound in ways that say nothing about their type.
@@ -303,9 +306,9 @@ class CompilerBase(ABC):
                     return "str"
                 if attr in {"encode", "decode"}:
                     return "str"
-                if attr in {"startswith", "endswith"}:
+                if attr in {"startswith", "endswith", *STRING_TESTS}:
                     return "bool"
-                if attr == "split":
+                if attr in {"split", "partition"}:
                     return "list"
                 return "num" if attr == "find" else None
             case ast.Attribute():
@@ -321,6 +324,8 @@ class CompilerBase(ABC):
     def name_kind(self, name: str) -> str | None:
         if name not in self.known:
             return value_kind(self.globalns.get(name, UNBOUND))
+        if name in self.declared:
+            return self.declared[name]
         if name in self._resolving:
             # A name whose value depends on itself, as in `n += 1`, is whatever
             # its other assignments make it.

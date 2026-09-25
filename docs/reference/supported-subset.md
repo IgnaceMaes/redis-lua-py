@@ -5,8 +5,9 @@ language with a faithful Lua meaning is accepted.
 
 **Supported:**
 
-- **Statements:** assignment, including unpacking (`a, b = b, a`);
-  augmented assignment; `if`/`elif`/`else`; `while`; `break`; `continue`;
+- **Statements:** assignment, including unpacking (`a, b = b, a`) and
+  annotated assignment (`text: str = redis.get(key)`), whose annotation tells
+  the compiler the value's type; augmented assignment; `if`/`elif`/`else`; `while`; `break`; `continue`;
   `return`.
 - **Errors:** `try` with one `except` (bare or `Exception`), `else` and
   `finally`; `raise SomeError("message")`, and a bare `raise` inside `except`;
@@ -23,8 +24,10 @@ language with a faithful Lua meaning is accepted.
   a name, and slices of lists and strings, with a step or without.
 - **Strings:** f-strings with format specs; `%` formatting; `+` and `*` on a
   string; `str.join`, `upper`, `lower`, `strip`, `lstrip`, `rstrip`,
-  `startswith`, `endswith`, `find`, `split` and `replace`; `encode()` and
-  `decode()` in UTF-8, which leave the bytes as they are.
+  `startswith`, `endswith`, `find`, `split`, `partition` and `replace`;
+  `isdigit`, `isalpha`, `isalnum` and `isspace`, which test ASCII as they do
+  on bytes; `encode()` and `decode()` in UTF-8, which leave the bytes as they
+  are.
 - **Builtins and methods:** `len()`, `int()`, which truncates toward zero,
   `float()`, `str()`, `min()`, `max()`, `abs()`, `ord()`, `chr()`, `.append()`,
   `.insert()`, `.pop()` and `dict.get()`; `isinstance()` against `str`,
