@@ -10,6 +10,7 @@ This module is private. Its shape is not part of the public API.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # Lua 5.1 operator precedence, lowest binding first. Used to decide where
@@ -106,6 +107,39 @@ def is_identifier(name: str) -> bool:
     return name.isidentifier() and name not in _LUA_KEYWORDS
 
 
+#: Globals the generated code refers to by a bare name. A script's own local
+#: of the same name would shadow them for the rest of its scope, so that, say,
+#: a parameter named ``error`` breaks every ``raise`` after it. Such a local is
+#: renamed with a trailing underscore instead.
+SHADOWABLE = frozenset(
+    {
+        "ARGV",
+        "KEYS",
+        "cjson",
+        "error",
+        "math",
+        "pairs",
+        "pcall",
+        "redis",
+        "string",
+        "table",
+        "tonumber",
+        "tostring",
+        "type",
+        "unpack",
+    }
+)
+
+
+def local_name(name: str) -> str:
+    """How a script's own name is spelled in Lua."""
+    return f"{name}_" if name in SHADOWABLE else name
+
+
+def local_names(names: Iterable[str]) -> str:
+    return ", ".join(local_name(name) for name in names)
+
+
 class Node:
     __slots__ = ()
 
@@ -147,6 +181,15 @@ class Bytes(Expr):
 
 @dataclass(frozen=True, slots=True)
 class Name(Expr):
+    """A name the script binds: a parameter, a local or a local function."""
+
+    id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Global(Expr):
+    """A name Redis or Lua provides, such as ``KEYS``, ``tostring`` or ``string.sub``."""
+
     id: str
 
 
@@ -311,6 +354,8 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
         case Bytes(value=v):
             return quote_bytes(v)
         case Name(id=v):
+            return local_name(v)
+        case Global(id=v):
             return v
         case Table(array=arr, hash=pairs):
             items = [emit_expr(a) for a in arr]
@@ -336,7 +381,7 @@ def emit_expr(node: Expr, parent_prec: int = 0) -> str:
             return ", ".join(emit_expr(item) for item in items)
         case Function(params=params, body=body):
             inner = " ".join(line.strip() for line in emit_block(list(body)))
-            return f"function({', '.join(params)}) {inner} end"
+            return f"function({local_names(params)}) {inner} end"
         case UnOp(op=op, operand=operand):
             spacer = " " if op == "not" else ""
             text = f"{op}{spacer}{emit_expr(operand, _UNARY_PRECEDENCE)}"
@@ -365,7 +410,7 @@ def emit_block(body: list[Stat], indent: int = 0) -> list[str]:
             case Comment(text=text):
                 lines += [f"{pad}-- {line}" for line in text.splitlines()]
             case Local(names=names, values=values):
-                target = ", ".join(names)
+                target = local_names(names)
                 if values:
                     rhs = ", ".join(emit_expr(v) for v in values)
                     lines.append(f"{pad}local {target} = {rhs}")
@@ -394,15 +439,15 @@ def emit_block(body: list[Stat], indent: int = 0) -> list[str]:
                 lines += emit_block(inner, indent + 1)
                 lines.append(f"{pad}until true")
             case LocalFunction(name=name, params=params, body=inner):
-                lines.append(f"{pad}local function {name}({', '.join(params)})")
+                lines.append(f"{pad}local function {local_name(name)}({local_names(params)})")
                 lines += emit_block(inner, indent + 1)
                 lines.append(f"{pad}end")
             case GenericFor(names=names, iterator=iterator, body=inner):
-                lines.append(f"{pad}for {', '.join(names)} in {emit_expr(iterator)} do")
+                lines.append(f"{pad}for {local_names(names)} in {emit_expr(iterator)} do")
                 lines += emit_block(inner, indent + 1)
                 lines.append(f"{pad}end")
             case NumericFor(var=var, start=start, stop=stop, step=step, body=inner):
-                header = f"{pad}for {var} = {emit_expr(start)}, {emit_expr(stop)}"
+                header = f"{pad}for {local_name(var)} = {emit_expr(start)}, {emit_expr(stop)}"
                 if step is not None:
                     header += f", {emit_expr(step)}"
                 lines.append(header + " do")

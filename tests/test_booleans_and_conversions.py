@@ -263,3 +263,63 @@ class TestCjsonNull:
         assert s(client, k="doc") == 1
         client.set("doc", '{"v": 0}')
         assert s(client, k="doc") == 0
+
+
+class TestShadowedGlobals:
+    """A local named like a global the generated code uses is renamed, not shadowing it."""
+
+    def test_every_global_still_works(self, client: Any, body: Body) -> None:
+        @script
+        def s(
+            KEYS: Key,  # noqa: N803
+            type: str,
+            error: str,
+            tostring: str,
+            tonumber: str,
+            pcall: str,
+            unpack: str,
+            pairs: str,
+            string: str,
+            table: str,
+            math: str,
+            ARGV: list[str],  # noqa: N803
+        ) -> list[bytes | int]:
+            try:
+                raise ValueError("boom")
+            except Exception as e:
+                caught = e
+            counts = {"a": 1}
+            total = 0
+            for _k, v in counts.items():
+                total = total + v
+            redis.rpush(KEYS, *ARGV)
+            parts = [type, error, tostring, tonumber, pcall, unpack, pairs, string, table, math]
+            return [
+                int(isinstance(type, str)),
+                str(len(parts)).encode(),
+                int(float(tonumber)),
+                ",".join(parts)[:9].encode(),
+                caught.encode(),
+                total,
+                redis.llen(KEYS),
+                cjson.encode(math),
+            ]
+
+        emitted = body(s)
+        assert "local error_ = ARGV[2]" in emitted
+        assert "local ARGV_ = {}" in emitted
+        assert s(
+            client,
+            KEYS="k",
+            type="t",
+            error="e",
+            tostring="s",
+            tonumber="7",
+            pcall="p",
+            unpack="u",
+            pairs="a",
+            string="g",
+            table="b",
+            math="m",
+            ARGV=["x", "y"],
+        ) == [1, b"10", 7, b"t,e,s,7,p", b"boom", 1, 2, b'"m"']

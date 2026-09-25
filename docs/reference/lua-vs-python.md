@@ -71,6 +71,15 @@ Python scopes a name to the whole function; Lua's `local` scopes it to the
 enclosing block. A name assigned inside an `if` and read after it is hoisted to
 the top of the script, so it does not silently read back `nil`.
 
+## Names Lua already uses are closed
+
+The generated Lua calls globals such as `type`, `error`, `tostring` and
+`pairs`, and reads `KEYS` and `ARGV`. A local of the same name would shadow
+them for the rest of the script, so a parameter named `error` would break
+every `raise` after it. Such a name is renamed with a trailing underscore
+instead: `local error_ = ARGV[1]`. The keyword argument on the Python side
+keeps its name.
+
 ## Strings are closed
 
 Lua's `+` is only arithmetic. It will add `"1" + "2"` to `3`. So `+`

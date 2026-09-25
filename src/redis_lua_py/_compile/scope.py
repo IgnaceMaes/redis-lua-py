@@ -126,15 +126,15 @@ class ScopeCompiler(CompilerBase):
 
             if self._is_key(arg.annotation):
                 self.keys.append(name)
-                source: lua.Expr = lua.Index(lua.Name("KEYS"), lua.Num(len(self.keys)))
+                source: lua.Expr = lua.Index(lua.Global("KEYS"), lua.Num(len(self.keys)))
             else:
                 self.args.append(name)
-                source = lua.Index(lua.Name("ARGV"), lua.Num(len(self.args)))
+                source = lua.Index(lua.Global("ARGV"), lua.Num(len(self.args)))
                 if self._is_numeric(arg.annotation):
                     # ARGV always arrives as strings; an int/float annotation
                     # is the author asking for the conversion.
                     self.numeric_args.add(name)
-                    source = lua.Call(lua.Name("tonumber"), (source,))
+                    source = lua.Call(lua.Global("tonumber"), (source,))
                 elif self._annotation_name(arg.annotation) == "bool":
                     # A bool arrives as "1" or "0", and "0" is a string Lua and
                     # Python both count as true. Comparing makes it a boolean.
@@ -216,9 +216,9 @@ class ScopeCompiler(CompilerBase):
         """
         self._temp += 1
         idx = f"__i{self._temp}"
-        item: lua.Expr = lua.Index(lua.Name(table), lua.Name(idx))
+        item: lua.Expr = lua.Index(lua.Global(table), lua.Name(idx))
         if numeric:
-            item = lua.Call(lua.Name("tonumber"), (item,))
+            item = lua.Call(lua.Global("tonumber"), (item,))
         target = lua.Name(name)
         slot = lua.Index(target, lua.BinOp("+", lua.UnOp("#", target), lua.Num(1)))
         return [
@@ -226,7 +226,7 @@ class ScopeCompiler(CompilerBase):
             lua.NumericFor(
                 idx,
                 lua.Num(start),
-                lua.UnOp("#", lua.Name(table)),
+                lua.UnOp("#", lua.Global(table)),
                 None,
                 [lua.Assign([slot], [item])],
             ),

@@ -54,11 +54,11 @@ class CallCompiler(ExpressionCompiler):
             case ast.Name(id="int"):
                 return self.int_call(node, args)
             case ast.Name(id=name) if name in BUILTIN_FUNCS:
-                return lua.Call(lua.Name(BUILTIN_FUNCS[name]), args)
+                return lua.Call(lua.Global(BUILTIN_FUNCS[name]), args)
             case ast.Attribute(value=receiver, attr="join") if not self.is_namespace(receiver):
                 if len(args) != 1:
                     self.fail(node, "join() takes exactly one argument")
-                return lua.Call(lua.Name("table.concat"), (args[0], self.expr(receiver)))
+                return lua.Call(lua.Global("table.concat"), (args[0], self.expr(receiver)))
             case ast.Attribute(value=ast.Name(id=recv) as receiver, attr="pop" | "insert") if (
                 recv in self.known
             ):
@@ -93,7 +93,7 @@ class CallCompiler(ExpressionCompiler):
                         hint="Lua's unpack() only expands in the last position. Append the "
                         "trailing values to the list first, then splat it.",
                     )
-                args.append(lua.Call(lua.Name("unpack"), (self.expr(arg.value),)))
+                args.append(lua.Call(lua.Global("unpack"), (self.expr(arg.value),)))
             else:
                 args.append(self.expr(arg))
         return tuple(args)
@@ -138,7 +138,7 @@ class CallCompiler(ExpressionCompiler):
                 hint="Assign the value to a name first, so that it is evaluated once.",
             )
         tests = [
-            lua.BinOp("==", lua.Call(lua.Name("type"), (subject,)), lua.Str(t)) for t in lua_types
+            lua.BinOp("==", lua.Call(lua.Global("type"), (subject,)), lua.Str(t)) for t in lua_types
         ]
         test = tests[0]
         for other in tests[1:]:
@@ -153,7 +153,7 @@ class CallCompiler(ExpressionCompiler):
                     "math.log() with a base is not supported",
                     hint="Lua 5.1's math.log takes no base; divide by math.log(base) instead.",
                 )
-            return lua.Call(lua.Name("math.log"), args)
+            return lua.Call(lua.Global("math.log"), args)
         target = MATH_FUNCS.get(attr)
         if target is None:
             self.fail(
@@ -161,7 +161,7 @@ class CallCompiler(ExpressionCompiler):
                 f"math.{attr}() has no Lua counterpart",
                 hint=f"Available: {listing(sorted([*MATH_FUNCS, 'log']), limit=10)}.",
             )
-        return lua.Call(lua.Name(target), args)
+        return lua.Call(lua.Global(target), args)
 
     def list_method(self, node: ast.Call, receiver: ast.Name) -> lua.Expr:
         """``xs.pop()`` and ``xs.insert(i, x)``, with the index shifted to 1-based."""
@@ -175,16 +175,16 @@ class CallCompiler(ExpressionCompiler):
         target = self.expr(receiver)
         if node.func.attr == "pop":
             if not node.args:
-                return lua.Call(lua.Name("table.remove"), (target,))
+                return lua.Call(lua.Global("table.remove"), (target,))
             if len(node.args) == 1:
                 return lua.Call(
-                    lua.Name("table.remove"), (target, self.index(node.args[0], "list"))
+                    lua.Global("table.remove"), (target, self.index(node.args[0], "list"))
                 )
             self.fail(node, "pop() takes at most one argument")
         if len(node.args) != 2:
             self.fail(node, "insert() takes exactly two arguments")
         return lua.Call(
-            lua.Name("table.insert"),
+            lua.Global("table.insert"),
             (target, self.index(node.args[0], "list"), self.expr(node.args[1])),
         )
 
@@ -217,10 +217,10 @@ class CallCompiler(ExpressionCompiler):
             self.fail(node, f"{attr}() takes {expected} argument(s) inside a script")
 
         if attr in {"upper", "lower"}:
-            return lua.Call(lua.Name(f"string.{attr}"), (target,))
+            return lua.Call(lua.Global(f"string.{attr}"), (target,))
         if attr in {"strip", "lstrip", "rstrip"}:
             pattern = {"strip": "^%s*(.-)%s*$", "lstrip": "^%s*(.*)$", "rstrip": "^(.-)%s*$"}
-            return lua.Call(lua.Name("string.match"), (target, lua.Str(pattern[attr])))
+            return lua.Call(lua.Global("string.match"), (target, lua.Str(pattern[attr])))
         if attr == "get":
             self.helpers.add("__get")
             default = args[1] if len(args) == 2 else lua.Nil()
@@ -236,7 +236,7 @@ class CallCompiler(ExpressionCompiler):
         if kind == "cjson":
             if attr not in {"encode", "decode"}:
                 self.fail(node, f"cjson has no {attr!r} function")
-            return lua.Call(lua.Index(lua.Name("cjson"), lua.Str(attr)), args)
+            return lua.Call(lua.Index(lua.Global("cjson"), lua.Str(attr)), args)
         if kind == "redis":
             return self.redis_call(node, attr, args)
         self.fail(
@@ -247,11 +247,11 @@ class CallCompiler(ExpressionCompiler):
 
     def redis_call(self, node: ast.Call, attr: str, args: tuple[lua.Expr, ...]) -> lua.Expr:
         if attr in REDIS_DIRECT:
-            return lua.Call(lua.Index(lua.Name("redis"), lua.Str(attr)), args)
+            return lua.Call(lua.Index(lua.Global("redis"), lua.Str(attr)), args)
         if attr.startswith("_"):
             self.fail(node, f"redis.{attr} is not a Redis command")
         tokens = tuple(lua.Str(token) for token in self.command_tokens(node, attr))
-        return lua.Call(lua.Index(lua.Name("redis"), lua.Str("call")), tokens + args)
+        return lua.Call(lua.Index(lua.Global("redis"), lua.Str("call")), tokens + args)
 
     def command_tokens(self, node: ast.Call, attr: str) -> tuple[str, ...]:
         """Turn an attribute name into the command tokens Redis expects.

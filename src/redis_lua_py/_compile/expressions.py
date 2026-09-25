@@ -80,11 +80,11 @@ class ExpressionCompiler(ScopeCompiler):
             return self.percent_format(node)
         if isinstance(node.op, ast.Mult) and "str" in (left_kind, right_kind):
             text, count = (node.left, node.right) if left_kind == "str" else (node.right, node.left)
-            return lua.Call(lua.Name("string.rep"), (self.expr(text), self.expr(count)))
+            return lua.Call(lua.Global("string.rep"), (self.expr(text), self.expr(count)))
 
         left, right = self.expr(node.left), self.expr(node.right)
         if isinstance(node.op, ast.FloorDiv):
-            return lua.Call(lua.Name("math.floor"), (lua.BinOp("/", left, right),))
+            return lua.Call(lua.Global("math.floor"), (lua.BinOp("/", left, right),))
         op = BIN_OPS.get(type(node.op))
         if op is None:
             self.fail(node, f"the {type(node.op).__name__} operator is not supported")
@@ -104,7 +104,7 @@ class ExpressionCompiler(ScopeCompiler):
             self.fail(node.right, "%-formatting from a mapping is not supported")
         values = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
         args = (self.expr(node.left), *(self.expr(v) for v in values))
-        return lua.Call(lua.Name("string.format"), args)
+        return lua.Call(lua.Global("string.format"), args)
 
     def compare(self, node: ast.Compare) -> lua.Expr:
         if len(node.ops) != 1:
@@ -200,7 +200,7 @@ class ExpressionCompiler(ScopeCompiler):
             helper = "__inlist"
         elif kind == "str":
             find = lua.Call(
-                lua.Name("string.find"),
+                lua.Global("string.find"),
                 (self.expr(container), self.expr(item), lua.Num(1), lua.Bool(True)),
             )
             return lua.BinOp("==" if negate else "~=", find, lua.Nil())
@@ -236,10 +236,10 @@ class ExpressionCompiler(ScopeCompiler):
                     )
                 inner = self.expr(value.value)
                 if value.format_spec is None:
-                    parts.append(lua.Call(lua.Name("tostring"), (inner,)))
+                    parts.append(lua.Call(lua.Global("tostring"), (inner,)))
                 else:
                     spec = lua.Str(self.printf_spec(value))
-                    parts.append(lua.Call(lua.Name("string.format"), (spec, inner)))
+                    parts.append(lua.Call(lua.Global("string.format"), (spec, inner)))
             else:  # pragma: no cover - JoinedStr only holds these two kinds
                 self.fail(value, "unsupported f-string component")
         if not parts:
@@ -309,7 +309,7 @@ class ExpressionCompiler(ScopeCompiler):
                 if position is not None and position < 0
                 else self.index(node.slice, container)
             )
-            return lua.Call(lua.Name("string.sub"), (self.expr(node.value), at, at))
+            return lua.Call(lua.Global("string.sub"), (self.expr(node.value), at, at))
 
         if position is not None and position < 0:
             if not isinstance(node.value, ast.Name):
