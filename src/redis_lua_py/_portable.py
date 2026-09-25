@@ -23,6 +23,20 @@ _Key = str | bytes | memoryview
 _Arg = str | bytes | memoryview | int | float
 
 
+class _SyncClient(Protocol):
+    """Enough of a sync redis-py client to type its call before the async one.
+
+    ``__enter__`` is the discriminator because every sync redis-py client has
+    one and no async client does. Checked first, it keeps a wrapper that
+    forwards everything through ``__getattr__`` -- which mypy takes to supply
+    ``__aenter__`` as well -- from being typed as async.
+    """
+
+    def __enter__(self) -> Any: ...
+
+    def register_script(self, script: str) -> Any: ...
+
+
 class _AsyncClient(Protocol):
     """Enough of an async redis-py client to tell it from a sync one.
 

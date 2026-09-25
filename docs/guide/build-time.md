@@ -82,6 +82,8 @@ _RATE_LIMIT_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
 @overload
+def rate_limit(client: _SyncClient, /, key: _Key, limit: int, ttl: int) -> int: ...
+@overload
 def rate_limit(
     client: _AsyncClient,
     /,

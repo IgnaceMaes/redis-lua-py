@@ -16,7 +16,7 @@ from typing import Any, Generic, TypeVar, overload
 
 from . import _lua as lua
 from ._compile import check_flags, compile_body, helper_order, helper_source
-from ._script import AsyncClient, BoundScript, resolve_arguments
+from ._script import AsyncClient, BoundScript, SyncClient, resolve_arguments
 from .errors import CompileError
 
 R = TypeVar("R")
@@ -262,6 +262,9 @@ class LibraryFunction(Generic[R]):
         return "\n".join(lines)
 
     @overload
+    def __call__(self, client: SyncClient, /, *positional: object, **keyword: object) -> R: ...
+
+    @overload
     def __call__(
         self, client: AsyncClient, /, *positional: object, **keyword: object
     ) -> Awaitable[R]: ...
@@ -273,6 +276,9 @@ class LibraryFunction(Generic[R]):
         keys, argv = self.resolve(*positional, **keyword)
         command = "FCALL_RO" if self.read_only else "FCALL"
         return self.library.call(client, command, self.name, keys, argv)
+
+    @overload
+    def bind(self, client: SyncClient) -> BoundScript[R]: ...
 
     @overload
     def bind(self, client: AsyncClient) -> BoundScript[Awaitable[R]]: ...

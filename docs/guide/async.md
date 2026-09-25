@@ -22,6 +22,11 @@ a = rate_limit(sync_client, key="u:1", limit=10, ttl=60)  # int
 b = rate_limit(async_client, key="u:1", limit=10, ttl=60)  # Awaitable[int]
 ```
 
+A client is typed as sync when it has `__enter__`, as every redis-py sync
+client does, and as async when it has `__aenter__`. The sync overload comes
+first, so a wrapper of your own that forwards attributes through `__getattr__`,
+which mypy takes to provide both, is typed as the sync client it wraps.
+
 Script caching, `EVALSHA`, and the `NOSCRIPT` reload are handled by redis-py's
 own script machinery, which this defers to rather than reimplementing.
 
