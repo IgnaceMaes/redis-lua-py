@@ -7,6 +7,19 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.11.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.10.0...v0.11.0) (2026-09-25)
+
+
+### Added
+
+* compile isinstance and cjson.null in script bodies ([373c4b7](https://github.com/IgnaceMaes/redis-lua-py/commit/373c4b79d58994e7a67ada0db9572496839af8da))
+
+
+### Fixed
+
+* rename locals that would shadow the Lua globals scripts rely on ([373c4b7](https://github.com/IgnaceMaes/redis-lua-py/commit/373c4b79d58994e7a67ada0db9572496839af8da))
+* type a client wrapper with getattr forwarding as sync, not async ([373c4b7](https://github.com/IgnaceMaes/redis-lua-py/commit/373c4b79d58994e7a67ada0db9572496839af8da))
+
 ## [0.10.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.9.0...v0.10.0) (2026-09-14)
 
 
