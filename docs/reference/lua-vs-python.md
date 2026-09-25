@@ -55,9 +55,17 @@ that is not known, it looks at the subscript:
 A value's type is known from its annotation, a literal, the builtin, method or
 operator that produced it, a `range()` or `enumerate()` loop variable, or
 every assignment to the name agreeing. So after `counts = {}`, `counts[0]` is
-the key `0`. A table that comes from elsewhere -- a Redis reply,
+the key `0`. A value that comes from elsewhere -- a Redis reply,
 `cjson.decode`, a helper's parameter -- is not known, and an integer subscript
-on it is taken to be a position.
+on it is taken to be a table position. For a string, that reads `nil`, so
+annotate the local to say what it holds:
+
+```python
+text: str | None = redis.get(key)
+```
+
+An annotation on a local is a declaration, not a conversion: it decides how
+the value is indexed and added, and changes nothing at runtime.
 
 `items[-1]` compiles to `items[#items]`, which needs a name to count back from.
 Indexing a string gives a one-character string, as it does in Python, through

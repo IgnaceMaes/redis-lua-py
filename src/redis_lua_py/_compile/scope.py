@@ -44,6 +44,10 @@ class ScopeCompiler(CompilerBase):
                 node.target, ast.Name
             ):
                 record(node.target.id, node)
+                if isinstance(node, ast.AnnAssign):
+                    declared = self._annotation_kind(self._without_none(node.annotation))
+                    if declared is not None:
+                        self.declared.setdefault(node.target.id, declared)
                 if isinstance(node, ast.AugAssign):
                     value: ast.expr = ast.BinOp(left=node.target, op=node.op, right=node.value)
                     self.values.setdefault(node.target.id, []).append(value)
@@ -118,7 +122,12 @@ class ScopeCompiler(CompilerBase):
                     self.variadic_key = name
                 else:
                     if self.variadic_arg is not None:
-                        self.fail(arg, "only one list parameter of arguments is supported")
+                        self.fail(
+                            arg,
+                            "only one list parameter of arguments is supported",
+                            hint="Interleave the values in one list and index it "
+                            "with a stride, as in values[3 * i + 1].",
+                        )
                     self.variadic_arg = name
                     if self._is_numeric(item):
                         self.numeric_args.add(name)
@@ -191,6 +200,26 @@ class ScopeCompiler(CompilerBase):
         if name in {"Key", "str", "bytes", "memoryview"}:
             return "str"
         return None
+
+    @staticmethod
+    def _without_none(node: ast.expr | None) -> ast.expr | None:
+        """``X`` from ``X | None`` or ``Optional[X]``: None is no kind of its own."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            try:
+                node = ast.parse(node.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            sides = [
+                side
+                for side in (node.left, node.right)
+                if not (isinstance(side, ast.Constant) and side.value is None)
+            ]
+            return sides[0] if len(sides) == 1 else None
+        name = ScopeCompiler._annotation_name(node)
+        if isinstance(node, ast.Subscript) and name == "Optional":
+            return node.slice
+        return node
 
     @staticmethod
     def _list_item(node: ast.expr | None) -> ast.expr | None:

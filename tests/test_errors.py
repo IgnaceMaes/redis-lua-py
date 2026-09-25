@@ -172,3 +172,25 @@ def test_an_except_name_that_is_a_lua_keyword_is_rejected() -> None:
             except Exception as end:
                 return len(end)
             return 0
+
+
+def test_keyword_arguments_hint_at_positional_options() -> None:
+    with pytest.raises(UnsupportedSyntax) as info:
+
+        @script
+        def put(key: Key, ttl: int) -> None:
+            redis.set(key, "v", ex=ttl)
+
+    assert info.value.hint is not None
+    assert "'EX', ttl" in info.value.hint
+
+
+def test_a_second_list_of_arguments_hints_at_a_stride() -> None:
+    with pytest.raises(UnsupportedSyntax) as info:
+
+        @script
+        def check(keys: list[Key], limits: list[int], ttls: list[int]) -> None:
+            pass
+
+    assert info.value.hint is not None
+    assert "3 * i" in info.value.hint

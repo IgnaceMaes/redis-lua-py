@@ -133,8 +133,8 @@ MATH_BY_OBJECT: dict[object, str] = {getattr(math, name): name for name in [*MAT
 
 METHOD_HINT = (
     "Available: the redis and cjson namespaces; list append, insert and pop; str join, "
-    "upper, lower, strip, lstrip, rstrip, startswith, endswith, find, split, replace, "
-    "encode and decode; and dict get."
+    "upper, lower, strip, lstrip, rstrip, startswith, endswith, find, split, partition, "
+    "replace, isdigit, isalpha, isalnum, isspace, encode and decode; and dict get."
 )
 
 
@@ -152,9 +152,24 @@ STRING_METHODS = frozenset(
         "endswith",
         "find",
         "split",
+        "partition",
         "replace",
+        "isdigit",
+        "isalpha",
+        "isalnum",
+        "isspace",
         "encode",
         "decode",
         "get",
     }
 )
+
+
+# The str.is* tests, as Lua patterns over the whole string. Lua's classes are
+# ASCII, which is exactly what the same methods on bytes test.
+STRING_TESTS: dict[str, str] = {
+    "isdigit": "^%d+$",
+    "isalpha": "^%a+$",
+    "isalnum": "^%w+$",
+    "isspace": "^%s+$",
+}

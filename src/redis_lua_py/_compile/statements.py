@@ -272,6 +272,7 @@ class Compiler(ControlFlowCompiler):
         # What the script's names hold is known inside the function too, except
         # for its parameters, which say nothing about their type.
         child.kinds = {k: v for k, v in self.kinds.items() if k not in params}
+        child.declared = {k: v for k, v in self.declared.items() if k not in params}
         child.values = {k: list(v) for k, v in self.values.items() if k not in params}
         child.opaque = self.opaque - set(params)
         child._temp = self._temp

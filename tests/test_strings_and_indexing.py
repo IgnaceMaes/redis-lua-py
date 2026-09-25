@@ -303,6 +303,69 @@ class TestStringMethods:
 
         assert shifted(client, c="a") == b"b"
 
+    def test_character_class_tests(self, client: Any) -> None:
+        @script
+        def classes(text: str) -> list[bool]:
+            return [text.isdigit(), text.isalpha(), text.isalnum(), text.isspace()]
+
+        assert "__" not in classes.lua  # a pattern match inline, no helper
+        assert classes(client, text="0042") == [1, None, 1, None]
+        assert classes(client, text="abC") == [None, 1, 1, None]
+        assert classes(client, text=" \t\n") == [None, None, None, 1]
+        assert classes(client, text="") == [None, None, None, None]
+        assert classes(client, text="-1") == [None, None, None, None]
+
+    def test_partition(self, client: Any) -> None:
+        @script
+        def parts(text: str) -> list[list[bytes]]:
+            return [text.partition(":"), text.partition("?")]
+
+        assert parts(client, text="5:a:b") == [[b"5", b":", b"a:b"], [b"5:a:b", b"", b""]]
+
+    def test_partition_and_isdigit_parse_a_version_prefix(self, client: Any) -> None:
+        @script
+        def version_of(key: Key) -> int:
+            raw: str | None = redis.get(key)
+            if raw is None:
+                return 0
+            prefix, sep, _body = raw.partition(":")
+            if sep and prefix.isdigit() and len(prefix) <= 15:
+                return int(prefix)
+            return 0
+
+        cases = {b"12:[]": 12, b"x:[]": 0, b"12": 0, b":[]": 0, b"1e3:[]": 0, b"-1:[]": 0}
+        for stored, expected in cases.items():
+            client.set("v", stored)
+            assert version_of(client, key="v") == expected, stored
+        client.delete("v")
+        assert version_of(client, key="v") == 0
+
+
+class TestAnnotatedLocals:
+    def test_an_annotation_makes_a_reply_a_string(self, client: Any) -> None:
+        @script
+        def first_char(key: Key) -> bytes:
+            text: str = redis.get(key)
+            return text[0]
+
+        assert "string.sub" in first_char.lua
+        client.set("t", "hello")
+        assert first_char(client, key="t") == b"h"
+
+    def test_an_optional_annotation_declares_the_inner_kind(self, client: Any) -> None:
+        @script
+        def digits_of(key: Key) -> list[bytes]:
+            text: str | None = redis.get(key)
+            out = []
+            if text is not None:
+                for i in range(len(text)):
+                    out.append(text[i])
+            return out
+
+        assert "string.sub" in digits_of.lua
+        client.set("t", "42")
+        assert digits_of(client, key="t") == [b"4", b"2"]
+
 
 class TestFormatting:
     def test_percent_formatting(self, client: Any) -> None:

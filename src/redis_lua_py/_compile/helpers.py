@@ -150,6 +150,15 @@ local function __find(s, sub)
   if i == nil then return -1 end
   return i - 1
 end""",
+    "__partition": """\
+-- str.partition: before, separator and after the first plain match, or the
+-- whole string and two empty strings when there is none.
+local function __partition(s, sep)
+  if sep == '' then error('empty separator', 0) end
+  local i, j = string.find(s, sep, 1, true)
+  if i == nil then return {s, '', ''} end
+  return {string.sub(s, 1, i - 1), sep, string.sub(s, j + 1)}
+end""",
     "__split": """\
 -- str.split: on a plain separator, or on runs of whitespace without one.
 local function __split(s, sep)
