@@ -19,6 +19,24 @@ never runs. `x is None` compiles to a helper accepting both, which also takes
 twice. `x == None` and `x != None` compile to the same helper, since that is
 plainly what they mean.
 
+`cjson.decode` gives JSON `null` as `cjson.null`, which is neither: compare
+with `== cjson.null`. Setting a field to `None` removes it, so write
+`cjson.null` where the encoded object should keep the field as `null`.
+
+## `isinstance` has Lua's types
+
+`isinstance(x, dict)` compiles to `type(x) == 'table'`, the usual guard on a
+decoded JSON value before reading its fields. Lua has fewer types than Python,
+so some tests answer for more than their name says:
+
+- `int` and `float` both test for a number, which may have a fraction;
+- `dict` and `list` both test for a table;
+- `str` and `bytes` both test for a string;
+- `bool` is not a number, so `isinstance(True, int)` is false.
+
+A tuple or a `|` union of types tests for any of them. A class of your own has
+no Lua counterpart, and is refused.
+
 ## Indexing is closed
 
 Lua tables are 1-based. `items[0]` compiles to `items[1]`. Write Python indices
@@ -52,6 +70,15 @@ them. A negative step walks backwards, so `word[::-1]` reverses.
 Python scopes a name to the whole function; Lua's `local` scopes it to the
 enclosing block. A name assigned inside an `if` and read after it is hoisted to
 the top of the script, so it does not silently read back `nil`.
+
+## Names Lua already uses are closed
+
+The generated Lua calls globals such as `type`, `error`, `tostring` and
+`pairs`, and reads `KEYS` and `ARGV`. A local of the same name would shadow
+them for the rest of the script, so a parameter named `error` would break
+every `raise` after it. Such a name is renamed with a trailing underscore
+instead: `local error_ = ARGV[1]`. The keyword argument on the Python side
+keeps its name.
 
 ## Strings are closed
 

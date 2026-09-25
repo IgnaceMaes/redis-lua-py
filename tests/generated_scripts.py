@@ -36,6 +36,20 @@ _Key = str | bytes | memoryview
 _Arg = str | bytes | memoryview | int | float
 
 
+class _SyncClient(Protocol):
+    """Enough of a sync redis-py client to type its call before the async one.
+
+    ``__enter__`` is the discriminator because every sync redis-py client has
+    one and no async client does. Checked first, it keeps a wrapper that
+    forwards everything through ``__getattr__`` -- which mypy takes to supply
+    ``__aenter__`` as well -- from being typed as async.
+    """
+
+    def __enter__(self) -> Any: ...
+
+    def register_script(self, script: str) -> Any: ...
+
+
 class _AsyncClient(Protocol):
     """Enough of an async redis-py client to tell it from a sync one.
 
@@ -149,6 +163,8 @@ _RATE_LIMIT_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
 @overload
+def rate_limit(client: _SyncClient, /, key: _Key, limit: int, ttl: int) -> int: ...
+@overload
 def rate_limit(
     client: _AsyncClient,
     /,
@@ -188,6 +204,8 @@ _TOUCH_ALL_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
 @overload
+def touch_all(client: _SyncClient, /, keys: Iterable[_Key], ttl: int) -> int: ...
+@overload
 def touch_all(
     client: _AsyncClient,
     /,
@@ -220,6 +238,8 @@ _AWKWARD_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
 @overload
+def awkward(client: _SyncClient, /) -> bytes: ...
+@overload
 def awkward(client: _AsyncClient, /) -> Awaitable[bytes]: ...
 @overload
 def awkward(client: Any, /) -> bytes: ...
@@ -244,6 +264,8 @@ return value .. suffix
 _ECHO_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
+@overload
+def echo(client: _SyncClient, /, value: str, *, suffix: str) -> bytes: ...
 @overload
 def echo(client: _AsyncClient, /, value: str, *, suffix: str) -> Awaitable[bytes]: ...
 @overload
@@ -277,6 +299,8 @@ return redis.call('LLEN', client)
 _PUSH_ALL_CLIENTS: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
+@overload
+def push_all(_client: _SyncClient, /, client: _Key, values: Iterable[str]) -> int: ...
 @overload
 def push_all(
     _client: _AsyncClient,

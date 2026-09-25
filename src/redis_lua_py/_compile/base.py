@@ -150,7 +150,9 @@ class CompilerBase(ABC):
                 and parts[1] in REDIS_CONSTANTS
                 and self.namespace_kind(parts[0]) == "redis"
             ):
-                return lua.Index(lua.Name("redis"), lua.Str(parts[1]))
+                return lua.Index(lua.Global("redis"), lua.Str(parts[1]))
+            if parts[1:] == ("null",) and self.namespace_kind(parts[0]) == "cjson":
+                return lua.Index(lua.Global("cjson"), lua.Str("null"))
             root = self.globalns.get(parts[0], UNBOUND)
             # A namespace answers to every attribute with a call stub, and
             # redis-py has a clearer error of its own; neither is a constant.
@@ -285,6 +287,8 @@ class CompilerBase(ABC):
             case ast.Subscript(value=value):
                 return "str" if self.kind(value) == "str" else None
             case ast.Call(func=ast.Name(id=name)) if not self.is_callable(name):
+                if name == "isinstance":
+                    return "bool"
                 if name in {"str", "tostring", "chr"}:
                     return "str"
                 if name in {"int", "float", "tonumber", "len", "abs", "ord"}:

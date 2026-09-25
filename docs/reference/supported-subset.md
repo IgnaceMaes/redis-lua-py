@@ -27,10 +27,12 @@ language with a faithful Lua meaning is accepted.
   `decode()` in UTF-8, which leave the bytes as they are.
 - **Builtins and methods:** `len()`, `int()`, which truncates toward zero,
   `float()`, `str()`, `min()`, `max()`, `abs()`, `ord()`, `chr()`, `.append()`,
-  `.insert()`, `.pop()` and `dict.get()`.
+  `.insert()`, `.pop()` and `dict.get()`; `isinstance()` against `str`,
+  `bytes`, `int`, `float`, `bool`, `dict` and `list`.
 - **The `math` module:** `floor`, `ceil`, `sqrt`, `fabs`, `fmod`, `exp`,
   `log`, `log10` and `pow`, imported either way.
-- **Calls:** into `redis` and `cjson`, with `*xs` allowed as the last argument.
+- **Calls:** into `redis` and `cjson`, with `*xs` allowed as the last argument,
+  and `cjson.null` for a JSON null.
 - **Parameters:** `list[Key]` and `list[...]`, for a variable number of keys
   and arguments.
 - **Module-level constants.**

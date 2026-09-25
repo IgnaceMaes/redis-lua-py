@@ -92,6 +92,8 @@ anything.
 
 The JSON library Redis exposes to scripts: `cjson.encode` and `cjson.decode`,
 which pass through under their own names.
+`cjson.null` is JSON `null`, which `None` is not: a field set to `None` is
+dropped from an encoded object.
 
 ## `CompiledScript`
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, overload
 from weakref import WeakKeyDictionary
 
-from ._portable import _AsyncClient, _encode, _encode_all, _items, _registered, _run
+from ._portable import _AsyncClient, _encode, _encode_all, _items, _registered, _run, _SyncClient
 from .errors import ScriptArgumentError
 
 #: What a script's return annotation describes: the value the *caller* gets
@@ -22,6 +22,10 @@ T = TypeVar("T")
 #: one. It lives with the rest of the call path in ``_portable``, which
 #: generated modules copy.
 AsyncClient = _AsyncClient
+
+#: A sync redis-py client, typed first so that a wrapper forwarding attributes
+#: through ``__getattr__`` is not mistaken for an async one.
+SyncClient = _SyncClient
 
 
 def resolve_arguments(
@@ -132,6 +136,9 @@ class CompiledScript(Generic[R]):
     )
 
     @overload
+    def __call__(self, client: SyncClient, /, *positional: object, **keyword: object) -> R: ...
+
+    @overload
     def __call__(
         self, client: AsyncClient, /, *positional: object, **keyword: object
     ) -> Awaitable[R]: ...
@@ -142,6 +149,9 @@ class CompiledScript(Generic[R]):
     def __call__(self, client: Any, /, *positional: object, **keyword: object) -> Any:
         keys, argv = self.resolve(*positional, **keyword)
         return _run(self.lua, self._registry, client, keys, argv)
+
+    @overload
+    def bind(self, client: SyncClient) -> BoundScript[R]: ...
 
     @overload
     def bind(self, client: AsyncClient) -> BoundScript[Awaitable[R]]: ...

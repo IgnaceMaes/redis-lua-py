@@ -99,6 +99,20 @@ BUILTIN_FUNCS: dict[str, str] = {
 }
 
 
+# The builtin types isinstance() can test for, by the Lua type() each one
+# answers to. Lua has one number type and one table type, so int and float,
+# and dict and list, cannot be told apart.
+ISINSTANCE_TYPES: dict[str, str] = {
+    "str": "string",
+    "bytes": "string",
+    "int": "number",
+    "float": "number",
+    "bool": "boolean",
+    "dict": "table",
+    "list": "table",
+}
+
+
 # Functions of the math module with a Lua counterpart of the same meaning.
 # math.log is handled apart, since only its one-argument form has one.
 MATH_FUNCS: dict[str, str] = {

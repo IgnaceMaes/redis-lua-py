@@ -9,7 +9,7 @@ pyproject.toml, which lists this file alongside ``src``.
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import redis
 import redis.asyncio
@@ -113,6 +113,30 @@ def check_a_generated_function(client: redis.Redis) -> None:
 
 async def check_an_async_generated_function(client: redis.asyncio.Redis) -> None:
     assert_type(await generated_scripts.rate_limit(client, key="x", limit=1, ttl=1), int)
+
+
+class ForwardingWrapper:
+    """A sync client wrapper that forwards everything else, as applications write them.
+
+    mypy takes ``__getattr__`` to supply ``__aenter__`` too, so without a sync
+    overload ahead of the async one, calls through this were typed as awaitable.
+    """
+
+    def __init__(self, client: redis.Redis) -> None:
+        self._client = client
+
+    def register_script(self, script: str) -> Any:
+        return self._client.register_script(script)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._client, item)
+
+
+def check_a_forwarding_wrapper(client: ForwardingWrapper) -> None:
+    assert_type(counter(client, k="x"), int)
+    assert_type(counter.bind(client)(k="x"), int)
+    assert_type(counted(client, k="x"), int)
+    assert_type(generated_scripts.rate_limit(client, key="x", limit=1, ttl=1), int)
 
 
 def test_the_annotation_does_not_change_what_runs() -> None:

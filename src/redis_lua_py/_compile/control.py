@@ -75,8 +75,8 @@ class ControlFlowCompiler(CallCompiler):
         the caller, or an except block, sees exactly what was raised.
         """
         if not isinstance(message, lua.Str):
-            message = lua.Call(lua.Name("tostring"), (message,))
-        return lua.ExprStat(lua.Call(lua.Name("error"), (message, lua.Num(0))))
+            message = lua.Call(lua.Global("tostring"), (message,))
+        return lua.ExprStat(lua.Call(lua.Global("error"), (message, lua.Num(0))))
 
     def raise_stmt(self, node: ast.Raise) -> lua.Stat:
         """``raise SomeError('message')``, which reaches the caller as an error reply."""
@@ -151,6 +151,8 @@ class ControlFlowCompiler(CallCompiler):
 
         failure: list[lua.Stat] = []
         if handler.name is not None:
+            if not lua.is_identifier(handler.name):
+                self.fail(handler, f"{handler.name!r} is a reserved word in Lua")
             self.helpers.add("__errmsg")
             message = lua.Call(lua.Name("__errmsg"), (lua.Name(result),))
             failure.append(lua.Local([handler.name], [message]))
@@ -182,7 +184,7 @@ class ControlFlowCompiler(CallCompiler):
             self.flow.pop()
         returns = contains_return(body)
         names = [ok, result, value] if returns else [ok, result]
-        call = lua.Call(lua.Name("pcall"), (lua.Name(function),))
+        call = lua.Call(lua.Global("pcall"), (lua.Name(function),))
         return (
             [lua.LocalFunction(function, [], inner), lua.Local(names, [call])],
             ok,
@@ -287,7 +289,7 @@ class ControlFlowCompiler(CallCompiler):
         if method == "values":
             self._temp += 1
             names = [f"__k{self._temp}", names[0]]
-        iterator = lua.Call(lua.Name("pairs"), (iterable,))
+        iterator = lua.Call(lua.Global("pairs"), (iterable,))
         return lua.GenericFor(names, iterator, self.loop_body(node.body))
 
     def enumerate_loop(self, node: ast.For, names: list[str], call: ast.Call) -> lua.Stat:

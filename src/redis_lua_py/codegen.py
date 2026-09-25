@@ -328,6 +328,8 @@ def _function(name: str, script: CompiledScript[Any]) -> str:
     return "\n".join(
         [
             "@overload",
+            signature("_SyncClient", returns, " ..."),
+            "@overload",
             signature("_AsyncClient", f"Awaitable[{returns}]", " ..."),
             "@overload",
             signature("Any", returns, " ..."),

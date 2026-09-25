@@ -160,3 +160,15 @@ def test_error_carries_a_hint() -> None:
 
     assert info.value.hint is not None
     assert "unpack()" in info.value.hint
+
+
+def test_an_except_name_that_is_a_lua_keyword_is_rejected() -> None:
+    with pytest.raises(UnsupportedSyntax, match="'end' is a reserved word in Lua"):
+
+        @script
+        def s(k: Key) -> int:
+            try:
+                redis.get(k)
+            except Exception as end:
+                return len(end)
+            return 0
