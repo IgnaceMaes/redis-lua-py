@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.12.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.11.0...v0.12.0) (2026-09-25)
+
+
+### Added
+
+* str.isdigit, partition and annotated locals ([#32](https://github.com/IgnaceMaes/redis-lua-py/issues/32)) ([38e863c](https://github.com/IgnaceMaes/redis-lua-py/commit/38e863c96a89cd0c2a82d0bc59d73771f295d164))
+
 ## [0.11.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.10.0...v0.11.0) (2026-09-25)
 
 
