@@ -11,7 +11,7 @@ def rate_limit(key: Key, limit: int, ttl: int) -> int: ...
 ```lua
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
+local ttl = ARGV[2]
 ```
 
 !!! warning "Annotate every key"
@@ -28,18 +28,27 @@ to it on the way in.
 | Annotation | In the script |
 | --- | --- |
 | `Key` | `KEYS[n]`, and what the cluster routes on |
-| `int`, `float` | wrapped in `tonumber`, so it is a number by the time your comparison runs |
+| `int`, `float` | wrapped in `tonumber`, so it is a number by the time your comparison runs; left as text when the body only hands it to Redis |
 | `str` | passed through as the string it already is |
 | `bool` | encoded as `"1"` or `"0"`, and a Lua boolean in the body |
 | `bytes`, `memoryview` | passed through untouched — see [Binary values](binary-values.md) |
 
+### Numbers only handed to Redis stay text
+
+In `rate_limit`, `ttl` is never compared or added to, only passed to `EXPIRE`,
+so it is left as the text it arrived as: `local ttl = ARGV[2]`. A Lua number is
+a double, which rounds an integer past 2^53, and which older servers write back
+with 17 digits, `0.1` as `0.10000000000000001`. Left as text, the value reaches
+Redis exactly as the caller passed it. The parameter is still an `int` to the
+caller, and it is converted as soon as the body does anything else with it.
+
 ### `float` carries a caveat
 
-Annotate `float` for arithmetic, not for a value you mean to write back
-unchanged. `tonumber` makes it a Lua number, and Lua renders a number back to
-text with `%.14g`, so a value with more significant digits than that does not
-come back as it went in. Annotate `str` and call `str()` at the call site when
-the value is only being carried.
+Annotate `float` for arithmetic, not for a value you mean to return unchanged.
+Unless the body only hands it to Redis, it is a Lua number, and Lua renders a
+number back to text with `%.14g`, so a value with more significant digits than that
+does not come back as it went in. Annotate `str` and call `str()` at the call
+site when the value is only being carried.
 
 ### `bool` is a boolean in the body
 
@@ -70,7 +79,7 @@ delete_tagged(client, tag="purged", keys=["a", "b", "c"], stamp=1700000000)
 
 ```lua
 local tag = KEYS[1]
-local stamp = tonumber(ARGV[1])
+local stamp = ARGV[1]
 local keys = {}
 for __i1 = 2, #KEYS do
   keys[#keys + 1] = KEYS[__i1]

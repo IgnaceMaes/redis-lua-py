@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -197,6 +198,122 @@ class TestGeneratedFunctions:
     def test_a_script_named_like_the_runtime_is_refused(self, tmp_path):
         with pytest.raises(RedisLuaError, match="_run"):
             codegen.generate(module_of(_run=codegen_scripts.rate_limit), tmp_path / "_lua.py")
+
+
+def python39() -> str | None:
+    """A Python 3.9 interpreter, if uv knows of one. CI installs one for this."""
+    uv = shutil.which("uv")
+    if uv is None:
+        return None
+    found = subprocess.run(
+        [uv, "python", "find", "3.9"], capture_output=True, text=True, check=False
+    )
+    if found.returncode != 0:
+        return None
+    return found.stdout.strip() or None
+
+
+#: Imports a generated module on its own, with nothing else installed.
+LOAD = """
+import importlib.util, sys
+
+spec = importlib.util.spec_from_file_location("generated_lua", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+"""
+
+#: Calls the scripts of codegen_scripts through a stand-in for redis-py that
+#: records what it is asked to run. Python 3.9, and standard library only.
+CALL = """
+class Client:
+    def __init__(self):
+        self.calls = []
+    def register_script(self, lua):
+        def run(keys, args, client):
+            self.calls.append((lua, keys, args))
+            return len(self.calls)
+        return run
+
+client = Client()
+assert module.rate_limit(client, key="k", limit=1, ttl=2) == 1
+assert module.touch_all(client, keys=iter([b"a", "b"]), ttl=2.5) == 2
+assert module.echo(client, True, suffix=memoryview(b"x")) == 3
+assert [call[1:] for call in client.calls] == [
+    (["k"], ["1", "2"]),
+    ([b"a", "b"], ["2.5"]),
+    ([], ["1", memoryview(b"x")]),
+]
+assert client.calls[0][0] == module.RATE_LIMIT
+for script, args in ((module.echo, (None, "")), (module.touch_all, ("ab", 1))):
+    try:
+        script(client, *args)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("accepted a value Redis cannot represent")
+print("ok")
+"""
+
+
+class TestPython39:
+    """A generated module imports and runs on Python 3.9.
+
+    This package needs 3.10, but a library vendoring the generated code may
+    still support 3.9, and the module is all of this package it ships.
+    """
+
+    @pytest.fixture
+    def widened(self, tmp_path):
+        out = tmp_path / "_lua.py"
+        codegen.generate(module_of(opaque=opaque, maybe=maybe), out)
+        return out
+
+    @pytest.mark.parametrize("which", ["checked_in", "widened"])
+    def test_parses_as_python_39(self, request, which):
+        path = GENERATED if which == "checked_in" else request.getfixturevalue("widened")
+        ast.parse(path.read_text(), feature_version=(3, 9))
+
+    @pytest.mark.parametrize("which", ["checked_in", "widened"])
+    def test_evaluates_no_union_operator(self, request, which):
+        # `X | Y` parses on 3.9 but fails there when evaluated. Annotations
+        # never are, under `from __future__ import annotations`.
+        path = GENERATED if which == "checked_in" else request.getfixturevalue("widened")
+        tree = ast.parse(path.read_text())
+        annotations = {
+            id(inner)
+            for node in ast.walk(tree)
+            for annotation in (getattr(node, "annotation", None), getattr(node, "returns", None))
+            if annotation is not None
+            for inner in ast.walk(annotation)
+        }
+        evaluated = [
+            ast.unparse(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.BitOr)
+            and id(node) not in annotations
+        ]
+
+        assert "from __future__ import annotations" in path.read_text()
+        assert evaluated == []
+
+    def test_runs_on_python_39(self, widened):
+        interpreter = python39()
+        if interpreter is None:
+            pytest.skip("no Python 3.9 available through uv")
+
+        def run(code: str, path: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [interpreter, "-I", "-c", code, str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        imported = run(LOAD, widened)
+        assert imported.returncode == 0, imported.stderr
+        called = run(LOAD + CALL, GENERATED)
+        assert called.stdout == "ok\n", called.stderr
 
 
 class TestPythonModule:

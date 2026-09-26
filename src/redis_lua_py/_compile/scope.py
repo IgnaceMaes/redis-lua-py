@@ -5,8 +5,9 @@ from __future__ import annotations
 import ast
 
 from .. import _lua as lua
-from .analysis import declares_exactly, target_names, walk_scope
+from .analysis import declares_exactly, only_forwarded, target_names, walk_scope
 from .base import CompilerBase
+from .tables import REDIS_DIRECT
 
 
 class ScopeCompiler(CompilerBase):
@@ -141,9 +142,12 @@ class ScopeCompiler(CompilerBase):
                 source = lua.Index(lua.Global("ARGV"), lua.Num(len(self.args)))
                 if self._is_numeric(arg.annotation):
                     # ARGV always arrives as strings; an int/float annotation
-                    # is the author asking for the conversion.
+                    # is the author asking for the conversion. Unless the value
+                    # only goes back to Redis: a Lua number is a double, so
+                    # converting would round an integer past 2^53 on the way.
                     self.numeric_args.add(name)
-                    source = lua.Call(lua.Global("tonumber"), (source,))
+                    if not only_forwarded(self.func, name, self._is_command):
+                        source = lua.Call(lua.Global("tonumber"), (source,))
                 elif self._annotation_name(arg.annotation) == "bool":
                     # A bool arrives as "1" or "0", and "0" is a string Lua and
                     # Python both count as true. Comparing makes it a boolean.
@@ -184,6 +188,16 @@ class ScopeCompiler(CompilerBase):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value.rsplit(".", 1)[-1].split("[", 1)[0]
         return None
+
+    def _is_command(self, node: ast.Call) -> bool:
+        """A call that sends its arguments to Redis as they are."""
+        func = node.func
+        return (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and self.namespace_kind(func.value.id) == "redis"
+            and (func.attr not in REDIS_DIRECT or func.attr in {"call", "pcall"})
+        )
 
     def _is_key(self, node: ast.expr | None) -> bool:
         return self._annotation_name(node) == "Key"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from .. import _lua as lua
 
@@ -132,6 +132,32 @@ def walk_scope(root: ast.AST) -> Iterator[ast.AST]:
         yield node
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
             pending.extend(ast.iter_child_nodes(node))
+
+
+def only_forwarded(
+    root: ast.FunctionDef, name: str, is_command: Callable[[ast.Call], bool]
+) -> bool:
+    """True if every use of a name is a whole argument to a Redis command.
+
+    Such a value is text going back to Redis, whatever it is annotated as.
+    Anything else -- arithmetic, a comparison, an assignment to it, a use in
+    a nested function that may shadow it -- makes the answer False, as does
+    no use at all.
+    """
+    forwarded = {
+        id(arg)
+        for statement in root.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call) and is_command(node)
+        for arg in node.args
+    }
+    uses = [
+        node
+        for statement in root.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name) and node.id == name
+    ]
+    return bool(uses) and all(id(use) in forwarded for use in uses)
 
 
 def target_names(target: ast.expr) -> list[str]:

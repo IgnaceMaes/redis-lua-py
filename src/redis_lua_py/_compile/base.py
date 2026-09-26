@@ -296,6 +296,13 @@ class CompilerBase(ABC):
                     return "str"
                 if name in {"int", "float", "tonumber", "len", "abs", "ord"}:
                     return "num"
+                if name in {"min", "max"} and node.args:
+                    # Python also takes the least of strings, or of one list,
+                    # so only numbers in make a number out.
+                    sides = {self.kind(arg) for arg in node.args}
+                    if sides <= {"num", "?"}:
+                        return "?" if sides == {"?"} else "num"
+                    return None
                 return "num" if self.math_attr(node.func) is not None else None
             case ast.Call(func=ast.Attribute(value=receiver, attr=attr)):
                 if self.math_attr(node.func) is not None:

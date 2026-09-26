@@ -12,7 +12,8 @@ pip install redis-lua-py
 
 ## Requirements
 
-- Python 3.10 or newer
+- Python 3.10 or newer. Modules [generated ahead of time](guide/build-time.md)
+  run on Python 3.9 too, without this package installed.
 - A Redis client: [redis-py](https://github.com/redis/redis-py) 4.2 or newer,
   or [coredis](https://github.com/alisaifee/coredis)
 

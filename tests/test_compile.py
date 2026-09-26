@@ -33,6 +33,26 @@ def test_numeric_annotations_get_tonumber(body: Body) -> None:
     assert "local text = ARGV[3]" in emitted
 
 
+def test_a_number_only_handed_to_redis_stays_text(body: Body) -> None:
+    @script
+    def s(k: Key, ttl: int, score: float, n: int, limit: int, step: int) -> int:
+        redis.expire(k, ttl)
+        redis.call("ZADD", k, score, "member")
+        redis.incrby(k, n)
+        if redis.incrby(k, limit) > limit:
+            return 0
+        step = step + 1
+        return redis.incrby(k, step)
+
+    emitted = body(s)
+    assert "local ttl = ARGV[1]" in emitted
+    assert "local score = ARGV[2]" in emitted
+    assert "local n = ARGV[3]" in emitted
+    # Compared, or assigned to: a number in the body, so converted as before.
+    assert "local limit = tonumber(ARGV[4])" in emitted
+    assert "local step = tonumber(ARGV[5])" in emitted
+
+
 def test_full_script_emission(body: Body) -> None:
     @script
     def rate_limit(key: Key, limit: int, ttl: int) -> int:
@@ -46,7 +66,7 @@ def test_full_script_emission(body: Body) -> None:
     assert body(rate_limit) == (
         "local key = KEYS[1]\n"
         "local limit = tonumber(ARGV[1])\n"
-        "local ttl = tonumber(ARGV[2])\n"
+        "local ttl = ARGV[2]\n"
         "local current = redis.call('INCR', key)\n"
         "if current == 1 then\n"
         "  redis.call('EXPIRE', key, ttl)\n"

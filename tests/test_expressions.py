@@ -172,3 +172,17 @@ class TestAddition:
         client.set("n", "5")
         assert "__add" not in bump.lua
         assert bump(client, k="n") == 11
+
+    def test_the_least_or_greatest_of_numbers_is_a_number(self, client: Any) -> None:
+        @script
+        def refill(key: Key, capacity: float, rate: float, now: float) -> int:
+            tokens = float(redis.get(key))
+            delta = max(0, now)
+            tokens = min(capacity, tokens + delta * rate)
+            return tokens
+
+        client.set("bucket", "2")
+        assert "__add" not in refill.lua
+        assert "tokens + delta * rate" in refill.lua
+        assert refill(client, key="bucket", capacity=10, rate=2, now=3) == 8
+        assert refill(client, key="bucket", capacity=5, rate=2, now=3) == 5

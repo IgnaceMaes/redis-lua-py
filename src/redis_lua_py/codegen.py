@@ -62,7 +62,7 @@ _IMPORTS = """\
 from __future__ import annotations
 
 from collections.abc import Awaitable, Iterable
-from typing import Any, Protocol, overload
+from typing import Any, Protocol, Union, overload
 from weakref import WeakKeyDictionary
 """
 

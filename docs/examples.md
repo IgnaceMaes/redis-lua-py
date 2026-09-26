@@ -42,8 +42,8 @@ def claim_jobs(queue: Key, processing: Key, now: int, limit: int) -> list[bytes]
 ```lua
 local queue = KEYS[1]
 local processing = KEYS[2]
-local now = tonumber(ARGV[1])
-local limit = tonumber(ARGV[2])
+local now = ARGV[1]
+local limit = ARGV[2]
 local ids = redis.call('ZRANGEBYSCORE', queue, 0, now, 'LIMIT', 0, limit)
 local claimed = {}
 for __i1 = 1, #ids do
