@@ -40,7 +40,8 @@ class TestArgv:
         """No tonumber, no tostring: a bytes annotation is a passthrough."""
         emitted = body(append_chunk)
         assert "local chunk = ARGV[1]" in emitted
-        assert "local ttl = tonumber(ARGV[2])" in emitted
+        # Only handed back to Redis, so the int is left as text too.
+        assert "local ttl = ARGV[2]" in emitted
 
     def test_non_utf8_argv_arrives_intact(self, client: Any) -> None:
         size, count = append_chunk(client, buffer="buf", counter="chunks", chunk=BLOB, ttl=60)

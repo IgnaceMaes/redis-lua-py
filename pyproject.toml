@@ -65,6 +65,10 @@ addopts = "-q"
 src = ["src", "tests"]
 line-length = 100
 target-version = "py310"
+# Generated modules must import on Python 3.9, which libraries that vendor them
+# may still support. Linting what they are built from as 3.9 code keeps a
+# 3.10-only construct out of them, and keeps ruff from asking for one.
+per-file-target-version = { "src/redis_lua_py/_portable.py" = "py39", "tests/generated_scripts.py" = "py39" }
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "N", "C4", "PT"]

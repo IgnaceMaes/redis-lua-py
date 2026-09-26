@@ -32,6 +32,9 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --dev --python ${{ matrix.python-version }}
+      # Generated modules must still run on 3.9, which libraries vendoring
+      # them may support; tests/test_codegen.py runs one there when it can.
+      - run: uv python install 3.9
       - run: uv run pytest
 
   oldest:

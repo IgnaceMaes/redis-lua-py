@@ -383,3 +383,32 @@ class TestDefiniteAssignment:
                 if n > 0:
                     head = 1
                 return head
+
+
+class TestNumbersHandedToRedis:
+    """A Lua number is a double, which has no exact form past 2^53."""
+
+    def test_a_large_integer_arrives_exactly(self, client: Any) -> None:
+        @script
+        def store(k: Key, n: int) -> bytes:
+            redis.set(k, n)
+            return redis.get(k)
+
+        assert store(client, k="n", n=2**53 + 1) == b"9007199254740993"
+
+    def test_a_float_is_not_rewritten_with_seventeen_digits(self, client: Any) -> None:
+        @script
+        def store(k: Key, x: float) -> bytes:
+            redis.set(k, x)
+            return redis.get(k)
+
+        assert store(client, k="f", x=0.1) == b"0.1"
+
+    def test_arithmetic_still_sees_a_number(self, client: Any) -> None:
+        @script
+        def twice(k: Key, n: int) -> int:
+            redis.set(k, n)
+            return n * 2 + 1
+
+        assert twice(client, k="n", n=20) == 41
+        assert client.get("n") == b"20"
