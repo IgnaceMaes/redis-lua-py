@@ -7,6 +7,13 @@ are written by [release-please](https://github.com/googleapis/release-please)
 from the conventional commit subjects on `main`; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for how a release is cut.
 
+## [0.13.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.12.0...v0.13.0) (2026-09-26)
+
+
+### Added
+
+* run generated modules on python 3.9 and keep forwarded numbers exact ([#34](https://github.com/IgnaceMaes/redis-lua-py/issues/34)) ([7178211](https://github.com/IgnaceMaes/redis-lua-py/commit/7178211f73e2503188240d62ebe8ab18278bdba2))
+
 ## [0.12.0](https://github.com/IgnaceMaes/redis-lua-py/compare/v0.11.0...v0.12.0) (2026-09-25)
 
 
